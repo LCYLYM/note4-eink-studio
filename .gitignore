@@ -17,6 +17,9 @@ firmware/sdkconfig.old
 *.key
 *.pem
 
+# Verification tool output
+evidence/
+
 # OS & logs
 .DS_Store
 *.log

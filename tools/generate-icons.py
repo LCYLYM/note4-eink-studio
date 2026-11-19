@@ -6,3 +6,5 @@ assert all(len(rows)==16 and all(len(row)==16 and set(row)<={'0','1'} for row in
 lines=['#pragma once','#include <cstdint>','namespace note4 {']
 for key,rows in icons.items():lines.append('inline constexpr uint16_t icon_'+key+'[16]={'+','.join(hex(int(row,2)) for row in rows)+'};')
 lines.append('}');(root/'firmware/main/gesture_icons.hpp').write_text('\n'.join(lines)+'\n')
+chars=json.loads((root/'shared/characters.json').read_text())
+(root/'web/characters.js').write_text('export const characters='+json.dumps(chars)+';\n')
