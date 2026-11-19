@@ -1,0 +1,20 @@
+{
+  "version": "1.1.0",
+  "runtime_states": ["running", "stopped", "completed"],
+  "receipt_states": ["created", "downloading", "verified", "staged", "activating", "running", "stopped", "failed", "cancelled", "completed", "duplicate", "rebooting", "ready", "confirmed", "rolled_back"],
+  "work_receipt_states": ["created", "downloading", "verified", "staged", "activating", "running", "stopped", "failed", "cancelled", "completed", "duplicate"],
+  "ota_receipt_states": ["created", "downloading", "verified", "rebooting", "ready", "confirmed", "failed", "cancelled", "rolled_back"],
+  "terminal_states": ["running", "stopped", "failed", "cancelled", "completed", "duplicate", "confirmed", "rolled_back"],
+  "work_stages": ["created", "downloading", "verified", "staged", "activating", "running"],
+  "ota_stages": ["created", "downloading", "verified", "rebooting", "ready", "confirmed"],
+  "device_model": "NOTE4-ESP32-S3",
+  "partition_layout": "note4-16m-ota-v1",
+  "template_abi": 1,
+  "ota_slot_bytes": 3145728,
+  "poll_idle_ms": 600000,
+  "poll_active_ms": 2000,
+  "heartbeat_write_ms": 60000,
+  "offline_after_ms": 1300000,
+  "max_receipts_per_device": 256,
+  "max_operations_per_device": 128
+}

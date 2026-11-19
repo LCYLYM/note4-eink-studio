@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "kind": "runner",
+  "title": "Penguin Run",
+  "template": {
+    "id": "runner",
+    "version": "1.0.0",
+    "abi": 1
+  },
+  "game": {
+    "character": "penguin",
+    "seed": 1,
+    "speed": 4,
+    "jump": 18,
+    "gravity": 3,
+    "obstacle_every": 400
+  },
+  "inputs": {
+    "jump": [
+      "gesture.wave"
+    ]
+  },
+  "run_policy": {
+    "max_run_seconds": 600
+  },
+  "gesture_feedback": {
+    "enabled": true,
+    "x": 280,
+    "y": 8
+  }
+}

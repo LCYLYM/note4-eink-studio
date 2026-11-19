@@ -1,0 +1,13 @@
+[
+{"input":1,"tick":1,"seed":1,"lane":1,"y":18,"vy":15,"score":0,"obstacleX":392,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":0,"tick":2,"seed":1,"lane":1,"y":33,"vy":12,"score":0,"obstacleX":384,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":2,"tick":3,"seed":1,"lane":0,"y":45,"vy":9,"score":0,"obstacleX":376,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":0,"tick":4,"seed":1,"lane":0,"y":54,"vy":6,"score":0,"obstacleX":368,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":4,"tick":5,"seed":1,"lane":1,"y":60,"vy":3,"score":0,"obstacleX":360,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":8,"tick":6,"seed":1,"lane":1,"y":63,"vy":0,"score":0,"obstacleX":352,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":16,"tick":7,"seed":1,"lane":0,"y":63,"vy":-3,"score":0,"obstacleX":344,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":32,"tick":8,"seed":1,"lane":1,"y":60,"vy":-6,"score":0,"obstacleX":336,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":64,"tick":9,"seed":1,"lane":1,"y":54,"vy":-9,"score":0,"obstacleX":328,"obstacleLane":0,"alive":true,"paused":false,"page":0},
+{"input":128,"tick":10,"seed":1,"lane":1,"y":54,"vy":-9,"score":0,"obstacleX":328,"obstacleLane":0,"alive":true,"paused":true,"page":0},
+{"input":1,"tick":11,"seed":1,"lane":1,"y":54,"vy":-9,"score":0,"obstacleX":328,"obstacleLane":0,"alive":true,"paused":true,"page":0}
+]

@@ -1,0 +1,47 @@
+{
+  "name": "note4-platform",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-10-08",
+  "assets": {
+    "directory": "../web",
+    "binding": "ASSETS",
+    "run_worker_first": [
+      "/api/*",
+      "/mcp"
+    ]
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "PLATFORM",
+        "class_name": "Platform"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": [
+        "Platform"
+      ]
+    }
+  ],
+  "vars": {
+    "DEV_MODE": "true"
+  },
+  "env": {
+    "production": {
+      "vars": {
+        "DEV_MODE": "false"
+      },
+      "durable_objects": {
+        "bindings": [
+          {
+            "name": "PLATFORM",
+            "class_name": "Platform"
+          }
+        ]
+      }
+    }
+  }
+}

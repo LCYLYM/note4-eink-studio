@@ -1,0 +1,31 @@
+{
+  "name": "note4-server",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev --ip 0.0.0.0 --port 8787",
+    "check": "tsc --noEmit",
+    "deploy": "wrangler deploy --env production",
+    "dev:local": "node --max-old-space-size=192 scripts/local.mjs",
+    "studio": "NOTE4_LEGACY_DEV=true NOTE4_STATE_DIR=.local/studio PORT=${PORT:-8799} node --max-old-space-size=192 scripts/local.mjs",
+    "start": "node --max-old-space-size=192 scripts/local.mjs"
+  },
+  "dependencies": {
+    "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
+    "@jitl/quickjs-wasmfile-release-sync": "0.32.0",
+    "esptool-js": "0.7.0",
+    "fast-png": "6.2.0",
+    "fflate": "0.8.2",
+    "quickjs-emscripten-core": "0.32.0",
+    "undici": "7.14.0",
+    "zod": "3.24.2",
+    "pako": "2.1.0"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "4.20251011.0",
+    "esbuild": "0.25.4",
+    "miniflare": "4.20251011.1",
+    "typescript": "5.8.3",
+    "wrangler": "4.45.0"
+  }
+}

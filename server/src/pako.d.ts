@@ -1,0 +1,1 @@
+declare module 'pako' {export function deflate(data:Uint8Array,options?:{level?:number}):Uint8Array;export class Inflate {constructor(options?:{chunkSize?:number});onData:(chunk:Uint8Array)=>void;err:number;push(data:Uint8Array,final?:boolean):boolean;}}

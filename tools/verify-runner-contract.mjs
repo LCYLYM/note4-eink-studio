@@ -1,0 +1,20 @@
+// Exercise the actual compiler and compare jump checks with the preview core.
+import assert from 'node:assert/strict';
+import {build} from '../server/node_modules/esbuild/lib/main.js';
+import {initial,step} from '../web/core.js';
+import {writeFile} from 'node:fs/promises';
+import {fileURLToPath} from 'node:url';
+const root=new URL('../',import.meta.url);
+await build({entryPoints:[fileURLToPath(new URL('server/src/compiler.ts',root))],bundle:true,format:'esm',platform:'node',outfile:fileURLToPath(new URL('server/.local/compiler-contract.mjs',root))});
+const {compile,defaults}=await import('../server/.local/compiler-contract.mjs');
+const spec=defaults('runner');spec.run_policy.max_run_seconds=600;
+const result=compile(spec,'contract-valid');assert.equal(result.manifest.lease_ms,600000);
+let s=initial({...spec.game,obstacle_every:800}),peak=0;
+do{step(s,s.tick===0?1:0,spec.game);peak=Math.max(peak,s.y);}while(s.y>0);
+assert.equal(peak,result.checks.jump_peak_px);
+assert.equal(s.tick*50,result.checks.jump_duration_ms);
+assert.throws(()=>compile({...spec,game:{...spec.game,jump:6,gravity:8}},'cannot-jump'),/cannot clear/);
+assert.throws(()=>compile({...spec,game:{...spec.game,jump:30,gravity:1}},'off-screen'),/leaves/);
+assert.equal(result.checks.hardware_interaction,'UNVERIFIED');
+const checks={status:'PASS',jump_peak_px:peak,jump_duration_ms:s.tick*50,checks:['production compiler rejects an unjumpable obstacle','production compiler rejects off-screen jumps','10-minute lease retained','software check does not claim hardware/optical acceptance'],hardware:'UNVERIFIED_BY_HOST_TEST'};
+await writeFile(new URL('evidence/runner-contract.json',root),JSON.stringify(checks,null,2)+'\n');console.log(JSON.stringify(checks));

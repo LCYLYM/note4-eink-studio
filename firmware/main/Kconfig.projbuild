@@ -1,0 +1,12 @@
+menu "NOTE4 local verification"
+config NOTE4_USB_TRANSPORT
+    bool "Production USB work transport; keep Wi-Fi off"
+    default n
+config NOTE4_USB_LAB_MODE
+    bool "USB-only work transport; keep Wi-Fi off"
+    default n
+config NOTE4_TEST_NVS_INIT_FAIL
+    bool "Inject NVS init failure to verify USB recovery"
+    depends on NOTE4_USB_LAB_MODE
+    default n
+endmenu

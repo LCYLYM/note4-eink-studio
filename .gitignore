@@ -1,0 +1,22 @@
+# Dependencies & build caches
+node_modules/
+server/.local/
+web/vendor/
+firmware/build*/
+firmware/managed_components/
+firmware/sdkconfig
+firmware/sdkconfig.old
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.key
+*.pem
+
+# OS & logs
+.DS_Store
+*.log
