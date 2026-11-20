@@ -215,7 +215,8 @@ static bool start_source(const char *src, size_t len, const char *ns, int mode) 
     if (!fb) fb = heap_caps_malloc(FB_SIZE, MALLOC_CAP_SPIRAM);
     if (!fb2) fb2 = heap_caps_malloc(FB_SIZE / 2, MALLOC_CAP_SPIRAM);
     if (!glass_tmp) glass_tmp = heap_caps_malloc(120000, MALLOC_CAP_SPIRAM);
-    if (!mem || !fb || !fb2 || !glass_tmp) return false;
+    // glass_tmp is optional: ui.glass falls back to the flat card when SPIRAM is short.
+    if (!mem || !fb || !fb2) return false;
     asset_count = next_count; asset_bytes = next_bytes; asset_at = next_asset_at; tick_ms = 0; next_count = 0;
     if (asset_count) {
         asset = fopen(asset_path, "rb");
