@@ -300,6 +300,8 @@ static JSValue js_ui_text(JSContext *c, JSValue *t, int argc, JSValue *argv) {
 static inline int rrect_cov(int px_x, int px_y, int x, int y, int w, int h, int r) {
     if (px_x < (int64_t)x || px_y < (int64_t)y || px_x >= (int64_t)x + w || px_y >= (int64_t)y + h) return 0;
     if (r <= 0) return 15;
+    // Beyond ~8x the screen the arc is flatter than a pixel; capping r keeps r4sq/dx*dx inside int64.
+    if (r > 8192) r = 8192;
     // Fast interior check (int64 so extreme x/y can't overflow)
     int64_t lx = (int64_t)px_x - x, ly = (int64_t)px_y - y;
     int64_t rx = ((int64_t)x + w - 1) - px_x, ry = ((int64_t)y + h - 1) - px_y;
@@ -402,8 +404,9 @@ static JSValue js_ui_line(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     int x0 = arg_int(argv, argc, 0, 0), y0 = arg_int(argv, argc, 1, 0);
     int x1 = arg_int(argv, argc, 2, 0), y1 = arg_int(argv, argc, 3, 0);
     int g = arg_int(argv, argc, 4, 0) & 15, th = clampi(arg_int(argv, argc, 5, 1), 1, 16);
-    x0 = clampi(x0, -65536, 66036); x1 = clampi(x1, -65536, 66036);
-    y0 = clampi(y0, -65536, 66036); y1 = clampi(y1, -65536, 66036);
+    // ±8192 is ~20x past the screen edge and keeps cross*cross*16 inside int64.
+    x0 = clampi(x0, -8192, 8592); x1 = clampi(x1, -8192, 8592);
+    y0 = clampi(y0, -8192, 8592); y1 = clampi(y1, -8192, 8592);
     int minx = (int)clampi64((int64_t)(x0 < x1 ? x0 : x1) - th, 0, 400);
     int maxx = (int)clampi64((int64_t)(x0 > x1 ? x0 : x1) + th + 1, 0, 400);
     int miny = (int)clampi64((int64_t)(y0 < y1 ? y0 : y1) - th, 0, 300);
@@ -449,12 +452,12 @@ static JSValue js_ui_grad(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     int x1 = clampi(x, 0, 400), y1 = clampi(y, 0, 300);
     int64_t gx2e = (int64_t)x + w, gy2e = (int64_t)y + h;
     int x2 = (int)(gx2e > 400 ? 400 : gx2e < 0 ? 0 : gx2e), y2 = (int)(gy2e > 300 ? 300 : gy2e < 0 ? 0 : gy2e);
-    int span = dir == 1 ? (w > 1 ? w - 1 : 1) : dir == 2 ? ((w + h) > 2 ? w + h - 2 : 1) : (h > 1 ? h - 1 : 1);
+    int64_t span = dir == 1 ? (w > 1 ? w - 1 : 1) : dir == 2 ? (((int64_t)w + h) > 2 ? (int64_t)w + h - 2 : 1) : (h > 1 ? h - 1 : 1);
     for (int yy = y1; yy < y2; yy++) {
         for (int xx = x1; xx < x2; xx++) {
-            int pos = dir == 1 ? (xx - x) : dir == 2 ? ((xx - x) + (yy - y)) : (yy - y);
+            int64_t pos = dir == 1 ? ((int64_t)xx - x) : dir == 2 ? (((int64_t)xx - x) + ((int64_t)yy - y)) : ((int64_t)yy - y);
             // Fixed-point 16x gray value in [0..240]
-            int val16 = g0 * 16 + ((g1 - g0) * 16 * pos) / span;
+            int val16 = (int)(g0 * 16 + ((int64_t)(g1 - g0) * 16 * pos) / span);
             int g;
             if (dots_mode) {
                 int avg = clampi((val16 + 8) >> 4, 0, 15);
