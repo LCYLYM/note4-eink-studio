@@ -9,7 +9,15 @@ const load=()=>vm??=Note4Vm.create(wasm as any,Uint8Array.from(atob(fontData),c=
 // Coarse layout sketch so the agent can notice blank or misplaced screens.
 function sketch(px:Uint8Array){const rows:string[]=[];for(let y=0;y<300;y+=16){let row='';for(let x=0;x<400;x+=8){let dark=0;for(let a=y;a<y+16&&a<300;a++)for(let b=x;b<x+8;b++)if(px[a*400+b]<8)dark++;row+=dark>24?'#':dark>0?'.':' ';}rows.push(row.trimEnd());}return rows.join('\n');}
 const fail=(where:string,log:string)=>{throw Error(`JS ${where} failed on the device engine: ${log.trim().slice(0,600)}`);};
-export async function checkJs(spec:any){
+// The WASM VM holds global state (framebuffer, store, netQueue); concurrent
+// checks would interleave and corrupt each other's results, so serialize them.
+let queue:Promise<unknown>=Promise.resolve();
+export function checkJs(spec:any){
+ const run=queue.then(()=>runCheck(spec));
+ queue=run.catch(()=>{});
+ return run;
+}
+async function runCheck(spec:any){
  const v=await load(),keys=['ok','up','down','ok','down','up',...(spec.js.wave?['wave']:[])];
  let slowest=0;const timed=(fn:()=>number,where:string)=>{v.clearLog();const t=performance.now(),r=fn(),ms=(performance.now()-t)*DEVICE_SLOWDOWN;slowest=Math.max(slowest,ms);if(r!==0)fail(where,v.log());if(ms>DEVICE_LIMIT_MS)throw Error(`${where} would take about ${Math.round(ms)} ms on the device; handlers must stay under ${DEVICE_LIMIT_MS} ms`);};
  timed(()=>v.start(spec.js.source,{},false,spec.js.asset?64:spec.js.photos?.length??0),'on_start');
