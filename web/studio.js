@@ -1,12 +1,25 @@
-// NOTE4 Studio v2.2: Minimalist Paper-Style E-Ink Co-Pilot & AI Push-Doc Relay.
-import {Note4Vm} from './vm.js?v=22';
-import {Note4USB} from './usb.js?v=22';
-import {showFlasher, flashApp, pickPort} from './flasher.js?v=22';
+// NOTE4 Studio v2.3: Minimalist Paper-Style E-Ink Co-Pilot, Streaming Harness & AI Push-Doc Relay.
+import {Note4Vm} from './vm.js?v=23';
+import {Note4USB} from './usb.js?v=23';
+import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const kb = n => (n / 1024 < 10 ? (n / 1024).toFixed(1) : Math.round(n / 1024)).toString();
+const tokFmt = n => (!n || n <= 0 ? '' : n < 1000 ? `${n} tok` : `${(n / 1000).toFixed(1)}K`);
+const renderReplyHtml = text => esc(text ?? '').replace(/`([^`\n]{1,80})`/g, '<code>$1</code>');
+function friendlyTaskError(raw) {
+  const s = String(raw ?? '').trim();
+  if (!s) return '制作未完成，请点「继续修复」重试';
+  if (/LOOP_GUARD_PAUSED|REPEATED_TOOL_FAILURE/.test(s)) return 'AI 遇到反复报错已自动暂停，可点「继续修复」或补充一句调整方向';
+  if (/TASK_BUDGET_REACHED/.test(s)) return '本轮修改步骤较多已自动暂停，草稿已保存，点「继续修复」可接着完成';
+  if (/TOKEN_BUDGET/.test(s)) return '本轮额度上限已到，草稿已保留，可点「新开对话」继续轻量修改';
+  if (/CONTEXT_REQUIRES_SLICES/.test(s)) return '对话内容偏长，建议点「新开对话」清空旧上下文后再继续（代码会完整保留）';
+  if (/MODEL_TRUNCATED/.test(s)) return '模型单次输出过长被截断，点「继续修复」会改为小步增量修改';
+  if (/Service restarted/.test(s)) return '服务刚刚重启更新，草稿已保留，点「继续修复」即可接着做';
+  return s;
+}
 const bytes = s => new TextEncoder().encode(String(s ?? '')).length;
 const ACTIVE = ['queued', 'running'];
 const PHASES = ['理解需求', '编写代码', '真机核验'];
@@ -14,8 +27,10 @@ const STEPS = {
   get_work: ['理解需求', '读取当前应用'],
   get_template: ['理解需求', '参考已有模板'],
   discover_capabilities: ['理解需求', '核对屏幕边界'],
+  edit_source: ['编写代码', '精准微调代码'],
   patch_fields: ['编写代码', '更新应用代码'],
   patch_work: ['编写代码', '写入应用代码'],
+  output_truncated: ['编写代码', '改为增量微调重试'],
   check_work: ['真机核验', '在设备同款引擎试跑核验'],
   build_work: ['真机核验', '编译设备安装包'],
   draft_service: ['编写代码', '起草后台服务'],
@@ -86,6 +101,8 @@ const S = {
   openDet: {settings: false, code: false},
   netLogs: [],
   task: null,
+  pendingMsg: '',
+  cancelling: false,
   liveDraftRev: 0,
   config: null,
   openSteps: false,
@@ -97,7 +114,7 @@ const S = {
 };
 
 const usb = new Note4USB();
-let vm, tickTimer, elapsedTimer, pollTimer, frameCache, inAutoTick = false;
+let vm, tickTimer, elapsedTimer, pollTimer, taskES = null, frameCache, inAutoTick = false;
 const previewAutoNetAt = new Map();
 
 async function api(path, method = 'GET', body) {
@@ -400,6 +417,12 @@ async function history() {
 }
 
 async function openWork(id, known) {
+  if (S.task && S.task.work_id !== id) {
+    stopFollow();
+    S.task = null;
+  }
+  S.pendingMsg = '';
+  S.cancelling = false;
   S.work = known ?? await api('/works/' + id);
   S.view = 'app';
   S.push = '';
@@ -416,8 +439,11 @@ async function openWork(id, known) {
   Promise.all([run(), history(), loadRelay()])
     .then(() => {
       if (S.work?.id === id) {
+        const running = S.tasks.find(t => ACTIVE.includes(t.state));
+        if (running && (!S.task || S.task.id !== running.id)) follow(running);
         render();
         paint();
+        scrollChatBottom();
       }
     })
     .catch(e => tell(e.message));
@@ -479,43 +505,78 @@ let pollVisHandler;
 function stopFollow() {
   clearTimeout(pollTimer);
   clearInterval(elapsedTimer);
+  if (taskES) {
+    try { taskES.close(); } catch {}
+    taskES = null;
+  }
   if (pollVisHandler) {
     document.removeEventListener('visibilitychange', pollVisHandler);
     pollVisHandler = null;
   }
 }
 
+function scrollChatBottom() {
+  const list = $('.chat-list');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+function updateTimelineOnly() {
+  const mount = $('#timelineMount');
+  if (mount) {
+    mount.innerHTML = renderTimelineHtml();
+    scrollChatBottom();
+  }
+}
+
 function follow(t) {
   stopFollow();
   S.task = t;
+  S.pendingMsg = '';
+  S.cancelling = false;
   S.openSteps = false;
   renderStream();
+  renderLive();
   if (!ACTIVE.includes(t.state)) return finish(t);
   startTaskClock();
+
+  let syncingDraft = false;
+  let handledTerminal = false;
   const handleUpdate = async v => {
+    if (!v || (S.task && S.task.id !== v.id)) return false;
     S.task = v;
     renderStream();
-    if (S.work?.id === v.work_id && ACTIVE.includes(v.state)) {
-      const patchedRev = [...(v.steps ?? [])].reverse().find(s => ['patch_fields', 'patch_work'].includes(s.tool) && s.result?.rev)?.result?.rev;
+    if (S.work?.id === v.work_id && ACTIVE.includes(v.state) && !syncingDraft) {
+      const patchedRev = [...(v.steps ?? [])]
+        .reverse()
+        .find(s => ['edit_source', 'patch_fields', 'patch_work'].includes(s.tool) && s.result?.rev)?.result?.rev;
       if (patchedRev && patchedRev > S.liveDraftRev) {
         S.liveDraftRev = patchedRev;
+        syncingDraft = true;
         try {
           S.work = await api('/works/' + S.work.id);
           await run(true);
-        } catch {}
+        } catch {} finally {
+          syncingDraft = false;
+        }
       }
     }
     if (!ACTIVE.includes(v.state)) {
+      if (handledTerminal) return true;
+      handledTerminal = true;
       stopFollow();
+      S.cancelling = false;
       finish(v);
       return true;
     }
     return false;
   };
+
+  // Fallback adaptive polling (only activated if SSE EventSource fails or is unsupported)
   const nextDelay = () => {
     const elapsed = Date.now() - (S.task?.created_at || Date.now());
-    return elapsed < 15000 ? 2500 : elapsed < 45000 ? 3500 : 5000;
+    return elapsed < 15000 ? 1800 : elapsed < 45000 ? 2800 : 4000;
   };
+  let pollingStarted = false;
   const poll = async () => {
     if (S.task?.id !== t.id || !ACTIVE.includes(S.task.state)) return;
     if (document.hidden) return;
@@ -523,23 +584,57 @@ function follow(t) {
       const v = await api(`/ai/tasks/${t.id}`);
       if (!(await handleUpdate(v))) pollTimer = setTimeout(poll, nextDelay());
     } catch {
-      pollTimer = setTimeout(poll, 5000);
+      pollTimer = setTimeout(poll, 4000);
     }
   };
+  const startPollingFallback = () => {
+    if (pollingStarted || handledTerminal) return;
+    pollingStarted = true;
+    if (taskES) {
+      try { taskES.close(); } catch {}
+      taskES = null;
+    }
+    pollTimer = setTimeout(poll, 1200);
+  };
+
   pollVisHandler = () => {
     if (!document.hidden && S.task?.id === t.id && ACTIVE.includes(S.task.state)) {
-      clearTimeout(pollTimer);
-      poll();
+      if (pollingStarted) {
+        clearTimeout(pollTimer);
+        poll();
+      } else if (!taskES || taskES.readyState === 2) {
+        startPollingFallback();
+      }
     }
   };
   document.addEventListener('visibilitychange', pollVisHandler);
-  // Adaptive short polling (no persistent SSE long connection across Cloudflare; 0 requests when idle or tab hidden)
-  pollTimer = setTimeout(poll, 2200);
+
+  // Primary: true real-time SSE stream for instant token/step/reply streaming
+  if (typeof EventSource !== 'undefined') {
+    try {
+      const es = new EventSource(`/api/ai/tasks/${encodeURIComponent(t.id)}/events`);
+      taskES = es;
+      es.onmessage = ev => {
+        try {
+          const v = JSON.parse(ev.data);
+          handleUpdate(v);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (!handledTerminal && S.task?.id === t.id && ACTIVE.includes(S.task.state)) {
+          startPollingFallback();
+        }
+      };
+      return;
+    } catch {}
+  }
+  startPollingFallback();
 }
 
 async function finish(t) {
   if (S.work?.id === t.work_id) {
     await reload(true);
+    scrollChatBottom();
     if (t.state === 'completed') tell('已完成制作并通过核验');
   } else {
     renderStream();
@@ -555,6 +650,11 @@ async function ask(text) {
     tell('AI 正在制作中，请等它完成或先点停止');
     return;
   }
+  // Optimistic UI: show user's message & streaming indicator immediately
+  S.pendingMsg = text;
+  updateTimelineOnly();
+  renderStream();
+
   const sendTask = async () => {
     const fresh = await api('/works/' + S.work.id);
     S.work = fresh;
@@ -565,23 +665,35 @@ async function ask(text) {
   try {
     task = await sendTask();
   } catch (e) {
+    S.pendingMsg = '';
     if (e.status === 409) {
-      task = await sendTask();
+      try {
+        task = await sendTask();
+      } catch (e2) {
+        const p = $('#prompt'); if (p && !p.value) p.value = text;
+        updateTimelineOnly(); renderStream();
+        throw e2;
+      }
     } else if (e.status === 429) {
       const running = (await api('/ai/tasks').catch(() => ({tasks: []}))).tasks.find(t => ACTIVE.includes(t.state));
       if (running && running.work_id === S.work.id) {
         follow(running);
         render();
+      } else {
+        updateTimelineOnly(); renderStream();
       }
       tell(running ? '已有 AI 任务正在运行，请稍候或先点停止' : e.message);
       return;
     } else {
+      const p = $('#prompt'); if (p && !p.value) p.value = text;
+      updateTimelineOnly(); renderStream();
       throw e;
     }
   }
   follow(task);
   await history();
   render();
+  scrollChatBottom();
 }
 
 async function create(text) {
@@ -1061,50 +1173,98 @@ function smartFollowupChips() {
 
 function renderTimelineHtml() {
   const doneTasks = S.tasks.filter(t => t.id !== S.task?.id || !ACTIVE.includes(t.state));
-  if (!doneTasks.length) {
+  const busy = ACTIVE.includes(S.task?.state) || !!S.pendingMsg;
+  if (!doneTasks.length && !S.pendingMsg) {
     return `<p class="small">直接说你想怎么改，AI 会自动调整代码并在右侧预览屏运行。</p>`;
   }
-  return `<div class="chat-list">${doneTasks.slice(-8).map(t => {
+  const latestDone = doneTasks.at(-1);
+  const items = doneTasks.slice(-12).map(t => {
     const ok = t.state === 'completed';
-    return `<div class="chat-turn">
+    const isLatestRecoverable = t === latestDone && !busy && ['failed', 'paused'].includes(t.state) && t.id !== S.task?.id;
+    const tok = tokFmt(t.tokens);
+    const meta = [t.actual_rev ? `v${t.actual_rev}` : '', tok, ago(t.created_at)].filter(Boolean).join(' · ');
+    const answerHtml = t.reply
+      ? renderReplyHtml(t.reply)
+      : ok
+        ? '已完成修改并通过核验。'
+        : t.error
+          ? esc('未完成：' + friendlyTaskError(t.error))
+          : '已停止';
+    return `<div class="chat-turn${!ok && t.state !== 'cancelled' ? ' err-turn' : ''}">
       <div class="chat-q">${esc(t.message)}</div>
-      <div class="chat-a">${esc(t.reply || (ok ? '已完成修改并通过核验。' : t.error ? '未完成：' + t.error : '已停止'))}</div>
+      <div class="chat-a">${answerHtml}</div>
       <div class="chat-foot">
-        <span class="num">${t.actual_rev ? `v${t.actual_rev} · ` : ''}${esc(ago(t.created_at))}</span>
-        ${t.actual_rev && t.actual_rev !== S.work.rev ? `<button type="button" class="link under" data-act="restore" data-rev="${t.actual_rev}">恢复到 v${t.actual_rev}</button>` : ''}
+        <span class="num">${esc(meta)}</span>
+        <span style="display:inline-flex;gap:10px;align-items:center">
+          ${isLatestRecoverable ? `<button type="button" class="link under" data-act="resumeTask" data-id="${esc(t.id)}">继续修复</button>` : ''}
+          ${t.actual_rev && t.actual_rev !== S.work.rev ? `<button type="button" class="link under" data-act="restore" data-rev="${t.actual_rev}">恢复到 v${t.actual_rev}</button>` : ''}
+        </span>
       </div>
     </div>`;
-  }).join('')}</div>`;
+  });
+  if (S.pendingMsg) {
+    items.push(`<div class="chat-turn pending-turn">
+      <div class="chat-q">${esc(S.pendingMsg)}</div>
+      <div class="chat-a">正在发送请求...</div>
+    </div>`);
+  }
+  const header = doneTasks.length >= 2 && !busy
+    ? `<div class="chat-bar"><span class="small num">对话记录（${doneTasks.length} 轮）</span><button type="button" class="link" data-act="resetContext">新开对话</button></div>`
+    : '';
+  return `${header}<div class="chat-list">${items.join('')}</div>`;
 }
 
 function renderStream() {
   const el = $('#stream'), t = S.task;
   if (!el) return;
+  if (S.pendingMsg && (!t || !ACTIVE.includes(t.state))) {
+    el.innerHTML = `<div class="stream-card"><div class="phases"><span class="now"><span class="dot"></span>理解需求</span><span><span class="dot"></span>编写代码</span><span><span class="dot"></span>真机核验</span><span class="timer num">0.0s</span></div><div style="font-size:13px">正在连接 AI 引擎...</div></div>`;
+    return;
+  }
   if (!t || t.work_id !== S.work?.id) { el.innerHTML = ''; return; }
   const list = parseSteps(t), active = ACTIVE.includes(t.state), done = t.state === 'completed';
   if (!active && done && S.tasks.some(x => x.id === t.id)) { el.innerHTML = ''; return; }
-  const cur = active ? PHASES.indexOf(list.at(-1)?.phase ?? '理解需求') : -1;
-  const line = active
-    ? (list.at(-1)?.text ?? (t.state === 'queued' ? '排队中...' : '正在规划改动...'))
-    : done
-      ? (t.reply || '已完成制作，右侧预览已更新。')
-      : t.state === 'cancelled'
-        ? '已停止本次制作'
-        : t.state === 'unconfigured'
-          ? '请先配置 AI 模型接口'
-          : ('制作失败：' + (t.error || '请重试'));
+
+  const liveToolPhase = t.live_tool ? (STEPS[t.live_tool]?.[0] ?? '编写代码') : null;
+  const cur = active ? PHASES.indexOf(liveToolPhase ?? list.at(-1)?.phase ?? '理解需求') : -1;
+
+  let lineHtml = '';
+  if (active) {
+    if (S.cancelling) {
+      lineHtml = '正在停止本次制作...';
+    } else if (t.live_reply && !t.live_tool) {
+      lineHtml = `<div class="stream-live">${renderReplyHtml(t.live_reply)}</div>`;
+    } else if (t.live_tool) {
+      const toolLabel = STEPS[t.live_tool]?.[1] ?? t.live_tool;
+      const sz = t.live_bytes > 200 ? `（${kb(t.live_bytes)} KB）` : '';
+      lineHtml = esc(`正在${toolLabel}${sz}...`);
+    } else {
+      lineHtml = esc(list.at(-1)?.text ?? (t.state === 'queued' ? '排队中...' : '正在思考方案...'));
+    }
+  } else if (done) {
+    lineHtml = renderReplyHtml(t.reply || '已完成制作，右侧预览已更新。');
+  } else if (t.state === 'cancelled') {
+    lineHtml = '已停止本次制作';
+  } else if (t.state === 'unconfigured') {
+    lineHtml = '请先配置 AI 模型接口';
+  } else {
+    lineHtml = esc((t.state === 'paused' ? '已暂停：' : '制作失败：') + friendlyTaskError(t.error));
+  }
+
   const sec = Math.max(0, ((t.completed_at || Date.now()) - (t.created_at || Date.now())) / 1000).toFixed(1);
+  const tok = tokFmt(t.tokens);
 
   el.innerHTML = `<div class="stream-card ${['failed', 'unconfigured'].includes(t.state) ? 'err-card' : ''}">
     <div class="phases">
       ${PHASES.map((p, i) => `<span class="${done || i < cur ? 'done' : i === cur ? 'now' : ''}"><span class="dot"></span>${p}</span>`).join('')}
       <span class="timer num" id="taskTimer">${sec}s</span>
+      ${tok ? `<span class="small num">${esc(tok)}</span>` : ''}
       <button type="button" class="link under" data-act="toggleSteps">${S.openSteps ? '收起' : `明细 (${list.length})`}</button>
     </div>
-    <div style="font-size:13px">${esc(line)}</div>
+    <div style="font-size:13px">${lineHtml}</div>
     ${active && S.liveDraftRev > (t.base_rev ?? 0) ? `<div class="small" style="color:var(--ok)">草稿 v${S.liveDraftRev} 已同步到右侧预览屏</div>` : ''}
     ${S.openSteps ? `<ol class="steps-log">${list.map(s => `<li${s.bad ? ' style="color:var(--bad)"' : ''}>${esc(s.phase)} · ${esc(s.text)}</li>`).join('') || '<li>等待开始...</li>'}</ol>` : ''}
-    ${['failed', 'paused'].includes(t.state) ? `<div><button type="button" class="btn sm soft" data-act="resume">继续修复</button></div>` : ''}
+    ${['failed', 'paused'].includes(t.state) ? `<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn sm soft" data-act="resume">继续修复</button><button type="button" class="link" data-act="resetContext">新开对话</button></div>` : ''}
     ${t.state === 'unconfigured' ? `<div><button type="button" class="btn sm solid" data-act="modelCfg">配置 AI 模型</button></div>` : ''}
   </div>`;
 }
@@ -1169,7 +1329,7 @@ function appHtml() {
             <div class="composer-foot">
               <span class="small">${S.config?.model?.status === 'CONFIGURED' ? 'Cmd/Ctrl + Enter 发送' : '请先配置 AI 模型'}</span>
               ${busy
-                ? '<button type="button" class="btn sm" data-act="cancel">停止</button>'
+                ? `<button type="button" class="btn sm" data-act="cancel"${S.cancelling ? ' disabled' : ''}>${S.cancelling ? '正在停止...' : '停止'}</button>`
                 : '<button class="btn sm solid">发送</button>'}
             </div>
           </form>
@@ -1446,9 +1606,11 @@ const ACTS = {
   },
 
   new: async () => {
+    stopFollow();
     S.view = 'home';
     S.work = null;
     S.relay = null;
+    S.pendingMsg = '';
     location.hash = '';
     render();
     await loadWorks();
@@ -1477,8 +1639,40 @@ const ACTS = {
   },
 
   toggleSteps: () => { S.openSteps = !S.openSteps; renderStream(); },
-  cancel: async () => { await api(`/ai/tasks/${S.task.id}/cancel`, 'POST', {}); },
+  cancel: async () => {
+    if (!S.task) return;
+    S.cancelling = true;
+    renderStream();
+    const res = await api(`/ai/tasks/${S.task.id}/cancel`, 'POST', {});
+    S.task = res;
+    if (!ACTIVE.includes(res.state)) {
+      stopFollow();
+      S.cancelling = false;
+      await finish(res);
+    } else {
+      renderStream();
+    }
+  },
   resume: async () => { follow(await api(`/ai/tasks/${S.task.id}/resume`, 'POST', {})); render(); },
+  resumeTask: async b => {
+    const id = b?.dataset?.id || S.task?.id;
+    if (!id) return;
+    follow(await api(`/ai/tasks/${encodeURIComponent(id)}/resume`, 'POST', {}));
+    render();
+  },
+  resetContext: async b => {
+    if (!S.work) return;
+    if (b && b.dataset.armed !== '1') {
+      b.dataset.armed = '1';
+      b.textContent = '确认清空记忆？';
+      setTimeout(() => { if (b.isConnected) { b.dataset.armed = ''; b.textContent = '新开对话'; } }, 3200);
+      return;
+    }
+    await api(`/works/${S.work.id}/context/reset`, 'POST', {});
+    if (S.task && !ACTIVE.includes(S.task.state)) S.task = null;
+    renderStream();
+    tell('已清空旧对话记忆，当前应用代码与历史版本均完整保留');
+  },
   fixError: async () => {
     if (!S.error) return;
     await ask(`请修复当前应用在预览引擎中的报错或越界问题：${S.error}`);
@@ -1522,7 +1716,7 @@ const ACTS = {
     tell('代码已保存并重新运行');
   },
   flash: () => showFlasher({usb, api, dialog, tell}),
-  demo: async () => (await import('./demo.js?v=22')).startDemo(),
+  demo: async () => (await import('./demo.js?v=23')).startDemo(),
 };
 
 document.addEventListener('click', e => {

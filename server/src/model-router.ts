@@ -8,7 +8,8 @@ export const AGENT_LIMITS = {
   max_tools: 50,
   tools_per_reply: 4,
   wall_ms: 300000,
-  request_ms: 90000,
+  request_ms: 120000,
+  idle_ms: 60000,
   total_tokens: 2097152,
 };
 
@@ -21,6 +22,12 @@ type Backend = {
   thinking?: string;
 };
 
+export type StreamDelta = {
+  content: string;
+  toolName: string;
+  toolArgBytes: number;
+};
+
 function friendlyModelError(err: any, base: string): string {
   const msg = String(err?.message ?? err ?? '未知错误');
   const code = err?.cause?.code ?? err?.code ?? '';
@@ -28,8 +35,8 @@ function friendlyModelError(err: any, base: string): string {
   if (/ENOTFOUND|EAI_AGAIN/i.test(msg) || ['ENOTFOUND', 'EAI_AGAIN'].includes(code)) {
     return '模型服务域名解析失败，请稍后重试或联系管理员检查网络';
   }
-  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR/i.test(msg) || ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT'].includes(code)) {
-    return '连接模型服务超时或被拒绝，请稍后点「继续修复」重试';
+  if (/ECONNREFUSED|ECONNRESET|ETIMEDOUT|UND_ERR|IDLE_TIMEOUT/i.test(msg) || ['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'IDLE_TIMEOUT'].includes(code)) {
+    return '连接模型服务超时或被中断，请稍后点「继续修复」重试';
   }
   if (/MODEL_HTTP_401|MODEL_HTTP_403/.test(msg)) {
     return '模型服务鉴权失败，请联系管理员核对配置';
@@ -43,12 +50,172 @@ function friendlyModelError(err: any, base: string): string {
   return '模型服务返回异常，请稍后点「继续修复」重试';
 }
 
+function extractUsage(usage: any): {total: number; cached: number; known: boolean} {
+  if (!usage || typeof usage !== 'object') return {total: 0, cached: 0, known: false};
+  const total = Number.isSafeInteger(usage.total_tokens) && usage.total_tokens >= 0
+    ? usage.total_tokens
+    : Number.isSafeInteger(usage.prompt_tokens) && Number.isSafeInteger(usage.completion_tokens)
+      ? usage.prompt_tokens + usage.completion_tokens
+      : -1;
+  if (total < 0) return {total: 0, cached: 0, known: false};
+  const rawCached = Number(
+    usage.prompt_tokens_details?.cached_tokens ??
+      usage.prompt_cache_hit_tokens ??
+      usage.cache_read_input_tokens ??
+      0
+  );
+  const cached = Number.isFinite(rawCached) && rawCached > 0 ? Math.min(total, Math.floor(rawCached)) : 0;
+  return {total, cached, known: true};
+}
+
+async function consumeSSE(
+  response: Response,
+  idleMs: number,
+  signal: AbortSignal,
+  onDelta?: (d: StreamDelta) => void
+) {
+  if (!response.body) throw Error('STREAM_BODY_MISSING');
+  const reader = response.body.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  let content = '';
+  let finishReason: string | null = null;
+  let returnedModel = 'unknown';
+  let usage: any = null;
+  const toolMap = new Map<number, {id: string; type: 'function'; function: {name: string; arguments: string}}>();
+  let toolArgBytes = 0;
+  let lastToolName = '';
+
+  const readWithIdle = async () => {
+    let timer: any;
+    const onAbort = () => reader.cancel().catch(() => {});
+    signal.addEventListener('abort', onAbort, {once: true});
+    try {
+      return await Promise.race([
+        reader.read(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            reader.cancel().catch(() => {});
+            reject(Object.assign(Error('STREAM_IDLE_TIMEOUT'), {code: 'IDLE_TIMEOUT'}));
+          }, idleMs);
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', onAbort);
+    }
+  };
+
+  const processLine = (rawLine: string) => {
+    const line = rawLine.trim();
+    if (!line || line.startsWith(':')) return;
+    if (!line.startsWith('data:')) return;
+    const dataStr = line.slice(5).trim();
+    if (!dataStr || dataStr === '[DONE]') return;
+    let chunk: any;
+    try {
+      chunk = JSON.parse(dataStr);
+    } catch {
+      return;
+    }
+    if (chunk.error) {
+      throw Error('MODEL_STREAM_ERROR:' + String(chunk.error?.message ?? chunk.error).slice(0, 200));
+    }
+    if (chunk.model) returnedModel = String(chunk.model);
+    if (chunk.usage) usage = chunk.usage;
+    const choice = chunk.choices?.[0];
+    if (!choice) return;
+    if (choice.finish_reason) finishReason = String(choice.finish_reason);
+    const delta = choice.delta ?? choice.message;
+    if (!delta) return;
+    let changed = false;
+    if (typeof delta.content === 'string' && delta.content) {
+      content += delta.content;
+      changed = true;
+    }
+    if (Array.isArray(delta.tool_calls)) {
+      for (const tc of delta.tool_calls) {
+        const idx = Number.isInteger(tc.index) ? tc.index : toolMap.size;
+        let slot = toolMap.get(idx);
+        if (!slot) {
+          slot = {
+            id: tc.id || `call_${idx}_${Date.now().toString(36)}`,
+            type: 'function',
+            function: {name: '', arguments: ''},
+          };
+          toolMap.set(idx, slot);
+        }
+        if (tc.id) slot.id = tc.id;
+        if (tc.function?.name) {
+          slot.function.name += tc.function.name;
+          lastToolName = slot.function.name;
+          changed = true;
+        }
+        if (typeof tc.function?.arguments === 'string' && tc.function.arguments) {
+          slot.function.arguments += tc.function.arguments;
+          toolArgBytes += tc.function.arguments.length;
+          changed = true;
+        }
+      }
+    }
+    if (changed && onDelta) {
+      onDelta({content, toolName: lastToolName, toolArgBytes});
+    }
+  };
+
+  try {
+    for (;;) {
+      if (signal.aborted) throw Error('CANCELLED');
+      const part = await readWithIdle();
+      if (part.done) break;
+      buf += dec.decode(part.value, {stream: true});
+      let nl = buf.indexOf('\n');
+      while (nl !== -1) {
+        processLine(buf.slice(0, nl));
+        buf = buf.slice(nl + 1);
+        nl = buf.indexOf('\n');
+      }
+    }
+    buf += dec.decode();
+    if (buf.trim()) {
+      for (const l of buf.split('\n')) processLine(l);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const tool_calls = [...toolMap.entries()]
+    .sort((a, b) => a[0] - b[0])
+    .map(([, v]) => v)
+    .filter(v => v.function.name);
+
+  return {
+    model: returnedModel,
+    usage,
+    choices: [
+      {
+        finish_reason: finishReason ?? 'stop',
+        message: {
+          role: 'assistant',
+          content,
+          ...(tool_calls.length ? {tool_calls} : {}),
+        },
+      },
+    ],
+  };
+}
+
 export class ModelRouter {
   active = 0;
   queue: Array<any> = [];
   cursor = 0;
 
   constructor(private s: any) {}
+
+  private maxConcurrent(): number {
+    const n = Number(this.s.env.MODEL_MAX_CONCURRENT ?? 4);
+    return Number.isFinite(n) && n >= 1 ? Math.min(16, Math.floor(n)) : 4;
+  }
 
   private runtime() {
     return this.s.get('model_runtime', 'default') ?? null;
@@ -77,7 +244,7 @@ export class ModelRouter {
       id: 'backend_' + i,
       model,
       context_tokens: 131072,
-      max_output_tokens: 8192,
+      max_output_tokens: 16384,
     }));
   }
 
@@ -118,8 +285,8 @@ export class ModelRouter {
 
   async slot(signal?: AbortSignal) {
     if (signal?.aborted) throw Error('CANCELLED');
-    if (this.active === 0) {
-      this.active = 1;
+    if (this.active < this.maxConcurrent()) {
+      this.active++;
       return;
     }
     if (this.queue.length >= 64) problem('AI 队列已满，请稍后再试', 429);
@@ -142,14 +309,20 @@ export class ModelRouter {
       q.signal?.removeEventListener('abort', q.abort);
       q.resolve();
     } else {
-      this.active = 0;
+      this.active = Math.max(0, this.active - 1);
     }
   }
 
-  async complete(scope: string, payload: any, signal?: AbortSignal, requestMs = 90000) {
+  async complete(
+    scope: string,
+    payload: any,
+    signal?: AbortSignal,
+    requestMs = AGENT_LIMITS.request_ms,
+    onDelta?: (d: StreamDelta) => void
+  ) {
     if (!this.configured()) problem('AI 模型尚未配置，请点击右上角「配置 AI 模型」填入地址与 Key', 503);
     await this.slot(signal);
-    const meter = {known_tokens: 0, usage_unknown: false, request_attempts: 0};
+    const meter = {known_tokens: 0, cached_tokens: 0, usage_unknown: false, request_attempts: 0};
     try {
       const base = this.baseUrl().replace(/\/+$/, '');
       const key = this.apiKey();
@@ -167,7 +340,6 @@ export class ModelRouter {
       let lastError = 'NO_BACKEND_AVAILABLE';
       const nowMs = Date.now();
       let toTry = ordered.filter(b => (this.s.get('model_health', b.id)?.retry_at ?? 0) <= nowMs);
-      // Never permanently lock out when all backends (e.g. single configured model) are in backoff: try the soonest one.
       if (!toTry.length && ordered.length) {
         const soonest = [...ordered].sort(
           (a, b) => (this.s.get('model_health', a.id)?.retry_at ?? 0) - (this.s.get('model_health', b.id)?.retry_at ?? 0)
@@ -183,36 +355,58 @@ export class ModelRouter {
         const timer = setTimeout(abort, requestMs);
         try {
           const context = Math.min(AGENT_LIMITS.context_tokens, backend.context_tokens);
-          const output = Math.min(payload.max_tokens ?? AGENT_LIMITS.max_output_tokens, backend.max_output_tokens, AGENT_LIMITS.max_output_tokens);
-          const body = {
-            ...payload,
-            model: backend.model,
-            max_tokens: output,
-            ...((backend.thinking ?? this.s.env.MODEL_THINKING) === 'disabled' ? {thinking: {type: 'disabled'}} : {}),
-          };
+          const output = Math.min(
+            payload.max_tokens ?? AGENT_LIMITS.max_output_tokens,
+            backend.max_output_tokens,
+            AGENT_LIMITS.max_output_tokens
+          );
           const endpoint = base.endsWith('/chat/completions') ? base : base + '/chat/completions';
-          let response!: Response;
-          for (let attempt = 0; attempt < 2; attempt++) {
-            try {
-              meter.request_attempts++;
-              response = await doFetch(endpoint, {
-                method: 'POST',
-                headers: {
-                  Authorization: 'Bearer ' + key,
-                  'Content-Type': 'application/json',
-                  'User-Agent': 'NOTE4-Platform/2.0.0',
-                  Connection: 'close',
-                },
-                body: JSON.stringify(body),
-                signal: control.signal,
-              });
-              break;
-            } catch (e: any) {
-              if (e.request_dispatched !== false) meter.usage_unknown = true;
-              const code = e.cause?.code ?? e.code;
-              if (attempt || control.signal.aborted || !['ECONNRESET', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT'].includes(code)) {
-                throw e;
+
+          const sendOnce = async (includeStreamOptions: boolean) => {
+            const body: any = {
+              ...payload,
+              model: backend.model,
+              max_tokens: output,
+              stream: true,
+              ...(includeStreamOptions ? {stream_options: {include_usage: true}} : {}),
+              ...((backend.thinking ?? this.s.env.MODEL_THINKING) === 'disabled' ? {thinking: {type: 'disabled'}} : {}),
+            };
+            let res!: Response;
+            for (let attempt = 0; attempt < 2; attempt++) {
+              try {
+                meter.request_attempts++;
+                res = await doFetch(endpoint, {
+                  method: 'POST',
+                  headers: {
+                    Authorization: 'Bearer ' + key,
+                    'Content-Type': 'application/json',
+                    Accept: 'text/event-stream, application/json',
+                    'User-Agent': 'NOTE4-Platform/2.1.0',
+                    Connection: 'close',
+                  },
+                  body: JSON.stringify(body),
+                  signal: control.signal,
+                });
+                break;
+              } catch (e: any) {
+                if (e.request_dispatched !== false) meter.usage_unknown = true;
+                const code = e.cause?.code ?? e.code;
+                if (attempt || control.signal.aborted || !['ECONNRESET', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT', 'ETIMEDOUT'].includes(code)) {
+                  throw e;
+                }
               }
+            }
+            return res;
+          };
+
+          let response = await sendOnce(true);
+          if (response.status === 400) {
+            const errBody: any = await readJSON(response, 8192).catch(() => ({}));
+            const errMsg = String(errBody.error?.message ?? errBody.message ?? '');
+            if (/stream_options/i.test(errMsg)) {
+              response = await sendOnce(false);
+            } else {
+              throw Error('MODEL_HTTP_400:' + errMsg.replace(/sk-[a-zA-Z0-9_-]+/g, '[redacted]').slice(0, 240));
             }
           }
           if (!response.ok) {
@@ -226,22 +420,41 @@ export class ModelRouter {
                   .slice(0, 240)
             );
           }
+
           let data: any;
+          const ct = String(response.headers.get('content-type') ?? '').toLowerCase();
           try {
-            data = await readJSON(response);
+            if (ct.includes('text/event-stream')) {
+              data = await consumeSSE(response, Math.min(AGENT_LIMITS.idle_ms, requestMs), control.signal, onDelta);
+            } else {
+              data = await readJSON(response);
+            }
           } catch (error) {
             meter.usage_unknown = true;
             throw error;
           }
-          if (Number.isSafeInteger(data.usage?.total_tokens) && data.usage.total_tokens >= 0) {
-            meter.known_tokens += data.usage.total_tokens;
+
+          const u = extractUsage(data.usage);
+          if (u.known) {
+            meter.known_tokens += u.total;
+            meter.cached_tokens += u.cached;
           } else {
             meter.usage_unknown = true;
           }
+
           if (!data.choices?.[0]?.message) throw Error('MODEL_MESSAGE_MISSING');
-          if (['length', 'model_context_window_exceeded', 'network_error'].includes(data.choices[0].finish_reason)) {
-            throw Error('MODEL_INCOMPLETE_' + data.choices[0].finish_reason);
+          const finishReason = data.choices[0].finish_reason;
+          if (finishReason === 'length') {
+            throw Object.assign(Error('MODEL_TRUNCATED'), {
+              code: 'MODEL_TRUNCATED',
+              nonBackend: true,
+              ...meter,
+            });
           }
+          if (['model_context_window_exceeded', 'network_error'].includes(finishReason)) {
+            throw Error('MODEL_INCOMPLETE_' + finishReason);
+          }
+
           this.s.put('model_health', {id: backend.id, failures: 0, retry_at: 0});
           this.s.put('model_sticky', {id: scope, backend: backend.id});
           return {
@@ -259,6 +472,7 @@ export class ModelRouter {
           };
         } catch (e: any) {
           if (signal?.aborted) throw Error('CANCELLED');
+          if (e?.nonBackend) throw e;
           lastError = friendlyModelError(e, base);
           errors.push({backend: backend.id, error: lastError});
           const failures = (this.s.get('model_health', backend.id)?.failures ?? 0) + 1;
