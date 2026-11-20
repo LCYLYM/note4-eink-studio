@@ -25,9 +25,10 @@ static JSValue js_ui_clear(JSContext *c, JSValue *t, int argc, JSValue *argv) { 
 static JSValue js_ui_rect(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     argc &= ~FRAME_CF_CTOR; int x = arg_int(argv, argc, 0, 0), y = arg_int(argv, argc, 1, 0), w = arg_int(argv, argc, 2, 0), h = arg_int(argv, argc, 3, 0), g = arg_int(argv, argc, 4, 0) & 15;
     if (w <= 0 || h <= 0) return JS_UNDEFINED;
-    if (w > 400) w = 400; if (h > 300) h = 300; // keep x+w / y+h inside int32 before the OOB check below
-    if (x < 0 || y < 0 || x + w > 400 || y + h > 300) JS_UI_OOB(x < 0 ? x : x + w, y < 0 ? y : y + h);
-    for (int yy = y; yy < y + h && yy < 300; yy++) for (int xx = x; xx < x + w && xx < 400; xx++) px(xx, yy, ink(xx, yy, g));
+    int64_t xe = (int64_t)x + w, ye = (int64_t)y + h; // int64 so huge w/h can't overflow the bounds math
+    if (x < 0 || y < 0 || xe > 400 || ye > 300) JS_UI_OOB(x < 0 ? x : (xe > 400 ? 400 : (int)xe), y < 0 ? y : (ye > 300 ? 300 : (int)ye));
+    if (xe > 400) xe = 400; if (ye > 300) ye = 300;
+    for (int yy = y < 0 ? 0 : y; yy < ye; yy++) for (int xx = x < 0 ? 0 : x; xx < xe; xx++) px(xx, yy, ink(xx, yy, g));
     return JS_UNDEFINED;
 }
 // ui.text(x, y, string, scale=1, gray=0, maxWidth=400-x) returns the next line's y.
