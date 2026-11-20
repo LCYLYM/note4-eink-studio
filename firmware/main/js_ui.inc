@@ -21,6 +21,7 @@
 
 static int arg_int(JSValue *argv, int argc, int i, int fallback) { int v; if (i >= argc || JS_ToInt32(ctx, &v, argv[i])) return fallback; return v; }
 static inline int clampi(int v, int lo, int hi) { return v < lo ? lo : v > hi ? hi : v; }
+static inline int64_t clampi64(int64_t v, int64_t lo, int64_t hi) { return v < lo ? lo : v > hi ? hi : v; }
 
 static inline int get_px(int x, int y) {
     if (x < 0 || y < 0 || x >= 400 || y >= 300) return 15;
@@ -269,7 +270,7 @@ static JSValue js_ui_text(JSContext *c, JSValue *t, int argc, JSValue *argv) {
             else if (ff && aa_find_glyph(ff, cp, &adv, &bmp)) used = ff;
         }
         int step_x = used ? adv * scale : (cp < 128 ? 9 : 16) * scale;
-        if (x > x0 && x + step_x > x0 + maxw) { x = x0; y += line_step; }
+        if (x > x0 && (int64_t)x + step_x > (int64_t)x0 + maxw) { x = x0; y += line_step; }
         if (cp != ' ') {
             if (x < tx1) tx1 = x;
             if (y < ty1) ty1 = y;
@@ -297,21 +298,21 @@ static JSValue js_ui_text(JSContext *c, JSValue *t, int argc, JSValue *argv) {
 
 // ---- Geometry & Rounded SDF Coverage (integer 2x2 supersampled AA) ----
 static inline int rrect_cov(int px_x, int px_y, int x, int y, int w, int h, int r) {
-    if (px_x < x || px_y < y || px_x >= x + w || px_y >= y + h) return 0;
+    if (px_x < (int64_t)x || px_y < (int64_t)y || px_x >= (int64_t)x + w || px_y >= (int64_t)y + h) return 0;
     if (r <= 0) return 15;
-    // Fast interior check
-    int lx = px_x - x, ly = px_y - y;
-    int rx = (x + w - 1) - px_x, ry = (y + h - 1) - px_y;
-    int cx = lx < r ? r - lx : rx < r ? r - rx : 0;
-    int cy = ly < r ? r - ly : ry < r ? r - ry : 0;
+    // Fast interior check (int64 so extreme x/y can't overflow)
+    int64_t lx = (int64_t)px_x - x, ly = (int64_t)px_y - y;
+    int64_t rx = ((int64_t)x + w - 1) - px_x, ry = ((int64_t)y + h - 1) - px_y;
+    int64_t cx = lx < r ? r - lx : rx < r ? r - rx : 0;
+    int64_t cy = ly < r ? r - ly : ry < r ? r - ry : 0;
     if (!cx || !cy) return 15;
     // 2x2 subpixel supersampling in quarter-pixel units (center offset 0.25 / 0.75)
-    int r4 = r * 4, r4sq = r4 * r4;
+    int64_t r4 = (int64_t)r * 4, r4sq = r4 * r4;
     int hits = 0;
     for (int sy = 0; sy < 2; sy++) {
-        int dy = (cy - 1) * 4 + (sy ? 3 : 1);
+        int64_t dy = (cy - 1) * 4 + (sy ? 3 : 1);
         for (int sx = 0; sx < 2; sx++) {
-            int dx = (cx - 1) * 4 + (sx ? 3 : 1);
+            int64_t dx = (cx - 1) * 4 + (sx ? 3 : 1);
             if (dx * dx + dy * dy <= r4sq) hits++;
         }
     }
@@ -326,8 +327,8 @@ static JSValue js_ui_rrect(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     if (w <= 0 || h <= 0) return JS_UNDEFINED;
     JS_UI_SHAPE(x, y, w, h, g, (w <= 3 || h <= 3) ? 2 : 0);
     if (r < 0) r = 0;
-    if (r * 2 > w) r = w / 2;
-    if (r * 2 > h) r = h / 2;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
     int64_t xe = (int64_t)x + w, ye = (int64_t)y + h;
     if (x < 0 || y < 0 || xe > 400 || ye > 300) JS_UI_OOB(x < 0 ? x : (xe > 400 ? 400 : (int)xe), y < 0 ? y : (ye > 300 ? 300 : (int)ye));
     int x1 = clampi(x, 0, 400), y1 = clampi(y, 0, 300);
@@ -350,11 +351,12 @@ static JSValue js_ui_rbox(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     if (w <= 0 || h <= 0) return JS_UNDEFINED;
     JS_UI_SHAPE(x, y, w, h, g, 1);
     if (r < 0) r = 0;
-    if (r * 2 > w) r = w / 2;
-    if (r * 2 > h) r = h / 2;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
     int ir = r > th ? r - th : 0;
     int x1 = clampi(x, 0, 400), y1 = clampi(y, 0, 300);
-    int x2 = clampi(x + w, 0, 400), y2 = clampi(y + h, 0, 300);
+    int64_t x2e = (int64_t)x + w, y2e = (int64_t)y + h;
+    int x2 = (int)(x2e > 400 ? 400 : x2e < 0 ? 0 : x2e), y2 = (int)(y2e > 300 ? 300 : y2e < 0 ? 0 : y2e);
     for (int yy = y1; yy < y2; yy++) {
         for (int xx = x1; xx < x2; xx++) {
             int outer = rrect_cov(xx, yy, x, y, w, h, r);
@@ -372,17 +374,21 @@ static JSValue js_ui_circle(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     int cx = arg_int(argv, argc, 0, 0), cy = arg_int(argv, argc, 1, 0);
     int r = arg_int(argv, argc, 2, 0), g = arg_int(argv, argc, 3, 0) & 15;
     if (r <= 0) return JS_UNDEFINED;
+    cx = clampi(cx, -65536, 66036); cy = clampi(cy, -65536, 66036); if (r > 66036) r = 66036;
     JS_UI_SHAPE(cx - r, cy - r, r * 2, r * 2, g, 3);
-    int x1 = clampi(cx - r, 0, 400), y1 = clampi(cy - r, 0, 300);
-    int x2 = clampi(cx + r + 1, 0, 400), y2 = clampi(cy + r + 1, 0, 300);
-    int r4 = r * 4, r4sq = r4 * r4;
+    int x1 = (int)((int64_t)cx - r < 0 ? 0 : (int64_t)cx - r > 400 ? 400 : (int64_t)cx - r);
+    int y1 = (int)((int64_t)cy - r < 0 ? 0 : (int64_t)cy - r > 300 ? 300 : (int64_t)cy - r);
+    int x2 = (int)((int64_t)cx + r + 1 < 0 ? 0 : (int64_t)cx + r + 1 > 400 ? 400 : (int64_t)cx + r + 1);
+    int y2 = (int)((int64_t)cy + r + 1 < 0 ? 0 : (int64_t)cy + r + 1 > 300 ? 300 : (int64_t)cy + r + 1);
+    int r4 = r * 4;
+    int64_t r4sq = (int64_t)r4 * r4;
     for (int yy = y1; yy < y2; yy++) {
         for (int xx = x1; xx < x2; xx++) {
-            int dx0 = (xx - cx) * 4, dy0 = (yy - cy) * 4;
+            int64_t dx0 = ((int64_t)xx - cx) * 4, dy0 = ((int64_t)yy - cy) * 4;
             int hits = 0;
             for (int sy = -1; sy <= 1; sy += 2)
                 for (int sx = -1; sx <= 1; sx += 2) {
-                    int dx = dx0 + sx, dy = dy0 + sy;
+                    int64_t dx = dx0 + sx, dy = dy0 + sy;
                     if (dx * dx + dy * dy <= r4sq) hits++;
                 }
             if (hits) blend_px(xx, yy, g, hits * 15 / 4);
@@ -396,12 +402,14 @@ static JSValue js_ui_line(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     int x0 = arg_int(argv, argc, 0, 0), y0 = arg_int(argv, argc, 1, 0);
     int x1 = arg_int(argv, argc, 2, 0), y1 = arg_int(argv, argc, 3, 0);
     int g = arg_int(argv, argc, 4, 0) & 15, th = clampi(arg_int(argv, argc, 5, 1), 1, 16);
-    int minx = clampi((x0 < x1 ? x0 : x1) - th, 0, 400);
-    int maxx = clampi((x0 > x1 ? x0 : x1) + th + 1, 0, 400);
-    int miny = clampi((y0 < y1 ? y0 : y1) - th, 0, 300);
-    int maxy = clampi((y0 > y1 ? y0 : y1) + th + 1, 0, 300);
+    x0 = clampi(x0, -65536, 66036); x1 = clampi(x1, -65536, 66036);
+    y0 = clampi(y0, -65536, 66036); y1 = clampi(y1, -65536, 66036);
+    int minx = (int)clampi64((int64_t)(x0 < x1 ? x0 : x1) - th, 0, 400);
+    int maxx = (int)clampi64((int64_t)(x0 > x1 ? x0 : x1) + th + 1, 0, 400);
+    int miny = (int)clampi64((int64_t)(y0 < y1 ? y0 : y1) - th, 0, 300);
+    int maxy = (int)clampi64((int64_t)(y0 > y1 ? y0 : y1) + th + 1, 0, 300);
     JS_UI_SHAPE(minx, miny, maxx - minx, maxy - miny, g, 2);
-    int64_t vx = x1 - x0, vy = y1 - y0, len2 = vx * vx + vy * vy;
+    int64_t vx = (int64_t)x1 - x0, vy = (int64_t)y1 - y0, len2 = vx * vx + vy * vy;
     // Capsule distance in quarter-pixel units
     int rad2 = (th * 2 + 1) * (th * 2 + 1); // (th/2 + 0.25)*4
     for (int yy = miny; yy < maxy; yy++) {
@@ -439,7 +447,8 @@ static JSValue js_ui_grad(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     if (x <= 0 && y <= 0 && w >= 400 && h >= 300) JS_UI_LAYOUT_RESET();
     else JS_UI_SHAPE(x, y, w, h, (g0 + g1) / 2, 0);
     int x1 = clampi(x, 0, 400), y1 = clampi(y, 0, 300);
-    int x2 = clampi(x + w, 0, 400), y2 = clampi(y + h, 0, 300);
+    int64_t gx2e = (int64_t)x + w, gy2e = (int64_t)y + h;
+    int x2 = (int)(gx2e > 400 ? 400 : gx2e < 0 ? 0 : gx2e), y2 = (int)(gy2e > 300 ? 300 : gy2e < 0 ? 0 : gy2e);
     int span = dir == 1 ? (w > 1 ? w - 1 : 1) : dir == 2 ? ((w + h) > 2 ? w + h - 2 : 1) : (h > 1 ? h - 1 : 1);
     for (int yy = y1; yy < y2; yy++) {
         for (int xx = x1; xx < x2; xx++) {
@@ -474,15 +483,15 @@ static JSValue js_ui_glass(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     if (w <= 4 || h <= 4) return JS_UNDEFINED;
     JS_UI_SHAPE(x, y, w, h, tint, 4);
     if (r < 0) r = 0;
-    if (r * 2 > w) r = w / 2;
-    if (r * 2 > h) r = h / 2;
+    if (r > w / 2) r = w / 2;
+    if (r > h / 2) r = h / 2;
     int64_t xe = (int64_t)x + w, ye = (int64_t)y + h;
     if (x < 0 || y < 0 || xe > 400 || ye > 300) JS_UI_OOB(x < 0 ? x : (xe > 400 ? 400 : (int)xe), y < 0 ? y : (ye > 300 ? 300 : (int)ye));
 
     // Step 1: Soft outer drop shadow (auto-tiered by waveform)
     if (dots_mode) {
-        int sx1 = clampi(x + 2, 0, 400), sy1 = clampi(y + 3, 0, 300);
-        int sx2 = clampi(x + w + 2, 0, 400), sy2 = clampi(y + h + 3, 0, 300);
+        int sx1 = (int)clampi64((int64_t)x + 2, 0, 400), sy1 = (int)clampi64((int64_t)y + 3, 0, 300);
+        int sx2 = (int)clampi64((int64_t)x + w + 2, 0, 400), sy2 = (int)clampi64((int64_t)y + h + 3, 0, 300);
         for (int yy = sy1; yy < sy2; yy++) {
             for (int xx = sx1; xx < sx2; xx++) {
                 if (rrect_cov(xx, yy, x, y, w, h, r) >= 8) continue;
@@ -495,8 +504,8 @@ static JSValue js_ui_glass(JSContext *c, JSValue *t, int argc, JSValue *argv) {
             int ox = ring, oy = ring + 1;
             int pad = ring - 1;
             int dark = (refresh_mode == 4) ? (rings + 1 - ring) : (ring == 1 ? 4 : 2);
-            int sx1 = clampi(x + ox - pad, 0, 400), sy1 = clampi(y + oy - pad, 0, 300);
-            int sx2 = clampi(x + w + ox + pad, 0, 400), sy2 = clampi(y + h + oy + pad, 0, 300);
+            int sx1 = (int)clampi64((int64_t)x + ox - pad, 0, 400), sy1 = (int)clampi64((int64_t)y + oy - pad, 0, 300);
+            int sx2 = (int)clampi64((int64_t)x + w + ox + pad, 0, 400), sy2 = (int)clampi64((int64_t)y + h + oy + pad, 0, 300);
             for (int yy = sy1; yy < sy2; yy++) {
                 for (int xx = sx1; xx < sx2; xx++) {
                     if (rrect_cov(xx, yy, x, y, w, h, r) >= 12) continue;
@@ -512,7 +521,8 @@ static JSValue js_ui_glass(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     }
 
     int x1 = clampi(x, 0, 400), y1 = clampi(y, 0, 300);
-    int x2 = clampi(x + w, 0, 400), y2 = clampi(y + h, 0, 300);
+    int64_t wx2e = (int64_t)x + w, wy2e = (int64_t)y + h;
+    int x2 = (int)(wx2e > 400 ? 400 : wx2e < 0 ? 0 : wx2e), y2 = (int)(wy2e > 300 ? 300 : wy2e < 0 ? 0 : wy2e);
     int rw = x2 - x1, rh = y2 - y1;
     if (rw <= 0 || rh <= 0) return JS_UNDEFINED;
 
@@ -601,7 +611,7 @@ static JSValue js_ui_glass(JSContext *c, JSValue *t, int argc, JSValue *argv) {
             // Outer 1px hairline refraction contour (crisp in both 16-gray and 4-gray)
             if (in1 < 12) {
                 if (is16) {
-                    bool upper_left = (yy - y) * w + (xx - x) * h < w * h;
+                    bool upper_left = ((int64_t)yy - y) * w + ((int64_t)xx - x) * h < (int64_t)w * h;
                     col_g = tint >= 8 ? (upper_left ? clampi(base - 4, 5, 11) : clampi(base - 5, 2, 10))
                                       : (upper_left ? clampi(base + 5, 6, 14) : clampi(base + 2, 3, 10));
                 } else {
