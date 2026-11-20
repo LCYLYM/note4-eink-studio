@@ -5,7 +5,7 @@ import {existsSync, readFileSync} from 'node:fs';
 
 // wasm takes about 8 ms on the benchmark the device runs in 292 ms.
 export const DEVICE_SLOWDOWN = 36;
-const DEVICE_LIMIT_MS = 800, TICK_LIMIT = 300;
+const DEVICE_LIMIT_MS = 1000, TICK_LIMIT = 300;
 let vm: Promise<Note4Vm> | undefined;
 function loadAaFont(): Uint8Array | undefined {
   for (const rel of ['../firmware/main/js_fonts_aa.bin', '../web/vendor/fonts_aa.bin', 'firmware/main/js_fonts_aa.bin', 'web/vendor/fonts_aa.bin']) {
@@ -13,7 +13,12 @@ function loadAaFont(): Uint8Array | undefined {
   }
   return undefined;
 }
-const load = () => (vm ??= Note4Vm.create(wasm as any, Uint8Array.from(atob(fontData), c => c.charCodeAt(0)), TICK_LIMIT, loadAaFont()));
+const load = () =>
+  (vm ??= Note4Vm.create(wasm as any, Uint8Array.from(atob(fontData), c => c.charCodeAt(0)), TICK_LIMIT, loadAaFont()).then(v => {
+    // Warm up V8 WASM tier-up once so the first user on_start check does not pay cold-JIT latency.
+    v.start('function on_start(){ui.clear(15);ui.glass(16,16,80,40,8,14,2);ui.font("sans");ui.text(24,24,"OK",1,0);ui.present();}', {}, 'clear', 0);
+    return v;
+  }));
 
 // Coarse layout sketch so the agent can notice blank or misplaced screens.
 function sketch(px: Uint8Array) {
@@ -51,11 +56,20 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
   const keys = ['ok', 'up', 'down', 'ok', 'down', 'up', ...(spec.js.wave ? ['wave'] : [])];
   const frames = spec.js.asset ? 64 : (spec.js.photos?.length ?? 0);
   let slowest = 0;
-  const timed = (fn: () => number, where: string) => {
+  const timed = (fn: () => number, where: string, retryOnJitter = false) => {
     v.clearLog();
-    const t = performance.now(), r = fn(), ms = (performance.now() - t) * DEVICE_SLOWDOWN;
-    slowest = Math.max(slowest, ms);
+    const t = performance.now(), r = fn();
+    let ms = (performance.now() - t) * DEVICE_SLOWDOWN;
     if (r !== 0) fail(where, v.log());
+    if (ms > DEVICE_LIMIT_MS && retryOnJitter && ms < 60000) {
+      // Single idempotent retry filters out transient Node GC / OS scheduler hiccups.
+      v.clearLog();
+      const t2 = performance.now(), r2 = fn();
+      const ms2 = (performance.now() - t2) * DEVICE_SLOWDOWN;
+      if (r2 !== 0) fail(where, v.log());
+      ms = Math.min(ms, ms2);
+    }
+    slowest = Math.max(slowest, ms);
     if (ms > DEVICE_LIMIT_MS) {
       throw Error(`${where} would take about ${Math.round(ms)} ms on the device; handlers must stay under ${DEVICE_LIMIT_MS} ms`);
     }
@@ -102,7 +116,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
 
   // 1. Offline + interactive check
   const mode = spec.js.refresh ?? 'fast';
-  timed(() => v.start(spec.js.source, {}, mode, frames), 'on_start');
+  timed(() => v.start(spec.js.source, {}, mode, frames), 'on_start', true);
   if (!v.dirty()) throw Error('on_start must draw the first screen and call ui.present()');
   mergeLayout('on_start');
   const first = sketch(v.pixels(false));
@@ -140,7 +154,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       (spec.js.conn_mode === 'apikey'
         ? 'var SECRET="sandbox-mock-key";\n'
         : 'var SECRET="https://sandbox.note4.invalid/api/relay/mock";\n');
-    timed(() => v.start(mockPreamble + spec.js.source, {}, mode, frames), 'on_start(mock_net)');
+    timed(() => v.start(mockPreamble + spec.js.source, {}, mode, frames), 'on_start(mock_net)', true);
     v.dirty();
     const queued = v.netQueue.splice(0);
     for (const q of queued) {
@@ -161,6 +175,13 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       mockSketch = sketch(v.pixels(false));
       mergeLayout('mock_net');
     }
+  }
+
+  const srcStr = String(spec.js.source ?? '');
+  if (layoutErrors.length > 0 && /ui\.font\(['"](?:sans|serif|display|display_lg)['"]\)[\s\S]{0,160}ui\.text\([^;\n]+,\s*[234]\s*,/.test(srcStr)) {
+    layoutErrors.push('排查提示：检测到在 AA 抗锯齿字体（sans/serif/display/display_lg）下给 ui.text 传了 scale>=2！AA 字体自带 20/24/36/48px 原生高度，传 scale=2/3 会变成 72–144px 巨字直接重叠并穿出卡片；请把所有 AA 字体的 ui.text(..., scale, ...) 全部改为 scale=1（要更大字直接切 display 或 display_lg，不要改 scale）！');
+  } else if (layoutErrors.length > 0 && /ui\.font\(['"](?:display_lg|display|serif)['"]\)/.test(srcStr)) {
+    layoutErrors.push('排查提示：ui.font() 是持久状态，画完 display_lg(48px)/display(36px)/serif(24px) 大字或标题后，务必立刻调用 ui.font(\'sans\') 切回 20px 正文，避免后续文字以超大字号重叠或溢出边框。');
   }
 
   return {

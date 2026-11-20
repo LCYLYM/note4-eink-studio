@@ -36,9 +36,9 @@ const JS_SKILL = {
     'js@1.0.0 ABI3：设备上的单页应用，源码放在 js.source，最大 64KB，语法是严格 ES5（不能用 let、const、箭头函数、class、模板字符串、解构）。' +
     '入口：function on_start() 画首屏；function on_key(k) 收到 up、ok、down。js.wave=true 时还会收到 wave，挥手只能作快捷操作，每个功能必须能用三键完成。' +
     '绘制：屏幕 400×300，灰度 0 黑到 15 白。所有内容必须完整落在 x 0 到 399、y 0 到 299 内，检查发现越界会判失败。' +
-    '写代码前先算布局：字高 16×scale，英文数字宽 9×scale，中文宽 16×scale，换行步进 22×scale。文字居中按实际宽度算 x，不能重叠；' +
-    'ui.clear(gray)；ui.rect(x,y,w,h,gray)；ui.text(x,y,string,scale=1,gray=0,maxWidth) 自动换行并返回下一行 y，scale 为 1 到 4；画完必须调用 ui.present()，封面图用 ui.present(\'clear\') 走 8 秒 16 灰刷新。' +
-    '高级字体与现代视觉原语（固件 1.8+ & 模拟器内置）：ui.font(name) 可切换字体：pixel（默认 16px 点阵，老模板兼容）、sans（20px 抗锯齿黑体，正文与卡片首选）、serif（24px 16级抗锯齿粗宋体，标题/金句首选）、display（36px 等宽抗锯齿数字/英文）、display_lg（48px 大时钟等宽数字）；用 ui.measure(str,scale) 精确测宽居中；ui.mode() 返回当前刷新模式；' +
+    '写代码前先算布局：默认 pixel 点阵字高 16×scale（英文宽 9×scale、中文宽 16×scale）；AA 抗锯齿字体自带原生高度（sans 20px、serif 24px、display 36px、display_lg 48px），调用 ui.text 时必须固定传 scale=1（绝不可传 scale=2/3 否则放大成 72–144px 巨字直接重叠穿框！）。文字居中按 ui.measure(str,1) 实测宽度算 x，不能重叠；' +
+    'ui.clear(gray)；ui.rect(x,y,w,h,gray)；ui.text(x,y,string,scale=1,gray=0,maxWidth) 自动换行并返回下一行 y；画完必须调用 ui.present()，封面图用 ui.present(\'clear\') 走 8 秒 16 灰刷新。' +
+    '高级字体与现代视觉原语（固件 1.8+ & 模拟器内置）：ui.font(name) 可切换字体（注意：①它是持久状态，切到 display_lg/display/serif 画完大数字或标题后必须立刻切回 ui.font(\'sans\') 再画正文；②所有 AA 字体一律传 scale=1，想放大字号只换字体名 sans→serif→display→display_lg）：pixel（16px 点阵）、sans（20px 抗锯齿黑体，正文与卡片首选）、serif（24px 16级抗锯齿粗宋体，标题/金句首选）、display（36px 等宽抗锯齿数字/英文，仅限数字英文）、display_lg（48px 大时钟等宽数字，仅限数字英文）；用 ui.measure(str,1) 按当前字体精确测宽居中；ui.mode() 返回当前刷新模式；' +
     'ui.rrect(x,y,w,h,r,gray) 圆角矩形；ui.rbox(x,y,w,h,r,gray,thick) 圆角描边；ui.circle(cx,cy,r,gray) 抗锯齿圆；ui.line(x0,y0,x1,y1,gray,thick) 抗锯齿线；ui.grad(x,y,w,h,g0,g1,dir) 微抖动平滑渐变（0竖/1横/2斜）；ui.glass(x,y,w,h,r,tint,blur) 原生液态玻璃（16 灰呈磨砂折射+柔影+高光折边，4 灰呈清爽浮卡，1-bit 自动降级为锐利白卡）。' +
     '墨水屏视觉与交互美学铁律（防嵌边、去模板味、直觉易懂）：' +
     '1. 安全边距与防嵌边：实体边框有倒角与阴影，内容安全外边距 >= 16px（x 在 16..384，y 在 16..284）；卡片内边距 padding >= 14px，文字右侧留足 >= 14px 缓冲绝不撞边；胶囊按钮和居中/右对齐必先用 ui.measure() 实测宽度；嵌套圆角保持同心（内圆角 < 外圆角）。' +
@@ -49,6 +49,7 @@ const JS_SKILL = {
     '存储：store.get(key) 返回字符串或 null，store.set(key,string)，key 为 1 到 16 位小写字母数字下划线，单值 4KB，总量 256KB，复杂数据用 JSON.stringify。' +
     '限制：单次处理必须在 1 秒内结束（on_net 3 秒），内存 512KB；没有 setTimeout、没有 DOM。' +
     '联网与连接模式（js.conn_mode）：local 为纯本地应用；public 为直连免密钥公开接口；relay 为本站数据推送通道（当用户想从电脑、脚本、手机或机器人传数据到墨水屏，或把按键动作回传电脑时，设 js.conn_mode=\'relay\'，并在 js.source 第一行写 // RELAY_JSON: {...} 标明读取的 JSON 字段示例；代码里读全局 RELAY 变量：GET RELAY 返回 {ok:true,state:{...},messages:[{id,from,who,text}]}，回传按键动作时 POST RELAY+\'/outbox\' 并设 keep:true 发 JSON 如 {action:\'ack\',text:\'已收到\'}；首次打开必须先展示好看的示例数据，不能空白）；apikey 为第三方平台密钥（设 js.conn_mode=\'apikey\' 与清晰的 js.secret_label，读全局 KEY）；url 为订阅链接或同局域网地址（设 js.conn_mode=\'url\' 与 js.secret_label，读全局 KEY）。' +
+    '内置免密钥公开 API 技能库（渐进式披露）：当用户需要天气、空气质量、日出日落、A股/黄金/汇率/加密货币/油价、热搜新闻、GitHub、HN、诗词一言、法定节假日倒计时、词典、维基、空间站或地震等实时联网数据时，先调用 lookup_public_api(query) 获取已实测可用的免密钥免费接口与城市坐标，自动把用户提到的城市/标的/仓库填入 URL，设 js.conn_mode=\'public\'，保留首屏示例兜底并用返回的 mock_net_sample 传给 check_work 核验，切勿编造或硬猜失效接口。' +
     'net.request({key,url,method,headers,body,keep}) 结果进 function on_net(key,status,body)，status 为 0 表示离线。长按下键是系统退出。' +
     '流程：已有代码微调优先用 edit_source，新建或换结构先参考 reference_template 或按需调用 get_template 再用 patch_fields；改完调用 check_work（联网/中转应用可传 mock_net 在离线沙箱模拟回包数据一起验证），确认屏幕草图布局均衡、零越界后再结束。\n' +
     JS_DESIGN,

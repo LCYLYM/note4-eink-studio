@@ -66,6 +66,14 @@ export function toolReceipt(value: any) {
       store_bytes: value.js.store_bytes,
     };
   }
+  if (Array.isArray(value.matches)) {
+    out.matched_apis = value.matches.map((m: any) => m.id);
+    if (Array.isArray(value.resolved_cities) && value.resolved_cities.length) {
+      out.resolved_cities = value.resolved_cities.map((c: any) => c.name);
+    }
+  } else if (Array.isArray(value.apis)) {
+    out.total_apis = value.total ?? value.apis.length;
+  }
   return out;
 }
 

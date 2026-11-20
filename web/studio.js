@@ -26,6 +26,7 @@ const PHASES = ['理解需求', '编写代码', '真机核验'];
 const STEPS = {
   get_work: ['理解需求', '读取当前应用'],
   get_template: ['理解需求', '参考已有模板'],
+  lookup_public_api: ['理解需求', '检索内置免费公开接口'],
   discover_capabilities: ['理解需求', '核对屏幕边界'],
   edit_source: ['编写代码', '精准微调代码'],
   patch_fields: ['编写代码', '更新应用代码'],

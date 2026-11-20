@@ -1,6 +1,7 @@
 import {AGENT_LIMITS, StreamDelta} from './model-router';
 import {buildStaticSystemPrompt} from './skills';
 import {JS_TEMPLATES, pickTemplate} from './js-templates';
+import {suggestPublicApiHint} from './public-apis';
 import {modelWork, toolReceipt, compactContext, sanitizeMessages, redactReply, textBytes} from './context';
 
 const enc = new TextEncoder();
@@ -91,6 +92,7 @@ export async function runAgent(s: any, task: any, auth: any) {
     // Never overwrite messages[0] when valid — preserves KV prefix cache!
     // Only seed/upgrade if empty or missing a system message (or legacy dynamic system prompt from pre-v2).
     if (!messages.length) {
+      const apiHint = initial.spec.kind === 'js' ? suggestPublicApiHint(task.message) : undefined;
       messages = [
         {role: 'system', content: staticSystem},
         {
@@ -102,6 +104,7 @@ export async function runAgent(s: any, task: any, auth: any) {
             ...(initial.spec.kind === 'js' && String(initial.spec.js?.source ?? '').length < 1500
               ? {reference_template: JS_TEMPLATES[pickTemplate(task.message)]}
               : {}),
+            ...(apiHint ? {available_public_apis_hint: apiHint} : {}),
           }),
         },
       ];
