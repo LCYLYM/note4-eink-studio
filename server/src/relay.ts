@@ -207,11 +207,17 @@ export class RelayHub {
     if (byteLen(payload) > 24576) problem('单次推送数据不能超过 24KB', 413);
     const t = now();
     const nextState = payload.replace_state === true ? {} : structuredClone(row.state ?? {});
+    // JSON.parse keeps __proto__/constructor/prototype as own keys; assigning
+    // them via Object.assign or obj[k]=v invokes the prototype setter and
+    // silently re-prototypes the merged state the device app then reads.
+    const blocked = (k: string) => k === '__proto__' || k === 'constructor' || k === 'prototype';
     if (payload.state && typeof payload.state === 'object' && !Array.isArray(payload.state)) {
-      Object.assign(nextState, payload.state);
+      for (const [k, v] of Object.entries(payload.state)) {
+        if (!blocked(k)) nextState[k] = v;
+      }
     } else {
       for (const [k, v] of Object.entries(payload)) {
-        if (!['messages', 'clear_inbox', 'replace_state'].includes(k)) {
+        if (!['messages', 'clear_inbox', 'replace_state'].includes(k) && !blocked(k)) {
           nextState[k] = v;
         }
       }
