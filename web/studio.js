@@ -211,7 +211,7 @@ function usesRelayCode(src) {
 async function engine() {
   if (vm) return vm;
   const [w, f, af] = await Promise.all([
-    fetch('vendor/note4_vm.wasm?v=24'),
+    fetch('vendor/note4_vm.wasm?v=26'),
     fetch('vendor/font16.bin'),
     fetch('vendor/fonts_aa.bin?v=24').catch(() => null),
   ]);
