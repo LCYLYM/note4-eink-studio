@@ -617,7 +617,9 @@ function follow(t) {
       es.onmessage = ev => {
         try {
           const v = JSON.parse(ev.data);
-          handleUpdate(v);
+          // Never leave the rejection dangling: on a terminal event the ES is
+          // already torn down, so a failed follow-up reload must not strand the UI.
+          void handleUpdate(v).catch(() => {});
         } catch {}
       };
       es.onerror = () => {
@@ -633,7 +635,9 @@ function follow(t) {
 
 async function finish(t) {
   if (S.work?.id === t.work_id) {
-    await reload(true);
+    try {
+      await reload(true);
+    } catch {}
     scrollChatBottom();
     if (t.state === 'completed') tell('已完成制作并通过核验');
   } else {
