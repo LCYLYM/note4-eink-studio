@@ -6,6 +6,7 @@ import {filterInput,canRetry} from '../web/input-policy.js';
 import {Preview} from '../web/preview.js';
 import {step} from '../web/core.js';
 const root=fileURLToPath(new URL('../',import.meta.url)),exe=root+'evidence/input_policy_test';
+fs.mkdirSync(root+'evidence',{recursive:true});
 execFileSync('c++',['-std=c++17','-I'+root+'firmware/main',root+'firmware/tests/input_policy_test.cpp','-o',exe]);
 const rows=execFileSync(exe,{encoding:'utf8'}).trim().split('\n');
 const modes=[['ok.short'],['gesture.wave'],['ok.short','gesture.wave']];
