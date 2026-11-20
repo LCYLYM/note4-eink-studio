@@ -190,10 +190,17 @@ void net_api_init() {
         FILE *f = fopen(path, "rb");
         FileHead h{};
         Req *r = nullptr;
-        if (f && fread(&h, sizeof h, 1, f) == 1 && h.magic == MAGIC && h.blob_len < 32768 && count < QUEUE_MAX) {
+        if (f && fread(&h, sizeof h, 1, f) == 1 && h.magic == MAGIC && h.blob_len > 0 && h.blob_len < 32768 && h.body_len < h.blob_len && count < QUEUE_MAX) {
             r = static_cast<Req *>(heap_caps_calloc(1, sizeof(Req), MALLOC_CAP_SPIRAM));
             if (r) r->blob = psram(h.blob_len);
             if (r && (!r->blob || fread(r->blob, 1, h.blob_len, f) != h.blob_len)) { free(r->blob); free(r); r = nullptr; }
+            // A corrupt file must not let body_of()/strlen walk past the blob: require the
+            // url\0method\0headers\0 layout and exactly body_len bytes before the trailing NUL.
+            if (r) {
+                const char *q = r->blob, *end = r->blob + h.blob_len - 1;
+                for (int i = 0; i < 3 && q; i++) { const char *z = static_cast<const char *>(memchr(q, 0, end - q)); q = z ? z + 1 : nullptr; }
+                if (!q || (size_t)(end - q) != h.body_len) { free(r->blob); free(r); r = nullptr; }
+            }
         }
         if (f) fclose(f);
         if (!r) { remove(path); continue; }
