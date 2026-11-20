@@ -29,11 +29,12 @@
 #define FULL_REFRESH_EVERY 30 // partial refreshes before a black-flash rebase clears ghosting
 
 extern const uint8_t font_start[] asm("_binary_js_font16_bin_start");
+extern const uint8_t aa_font_start[] asm("_binary_js_fonts_aa_bin_start");
 extern const char app_start[] asm("_binary_js_probe_app_js_start");
 extern const char app_end[] asm("_binary_js_probe_app_js_end");
 
 static JSContext *ctx;
-static uint8_t *mem, *fb, *fb2;
+static uint8_t *mem, *fb, *fb2, *glass_tmp;
 static volatile bool dirty;
 static bool waiting_refresh;
 static int64_t deadline, present_at, last_busy;
@@ -41,6 +42,7 @@ static char injected[16];
 static char app_ns[9];
 static bool dots_mode = true, force_clear;
 static int refresh_mode;
+static int active_font = 0;
 static int fast_count;
 static FILE *asset;
 static char asset_path[64];
@@ -212,7 +214,8 @@ static bool start_source(const char *src, size_t len, const char *ns, int mode) 
     if (!mem) mem = heap_caps_malloc(JS_HEAP_SIZE, MALLOC_CAP_SPIRAM);
     if (!fb) fb = heap_caps_malloc(FB_SIZE, MALLOC_CAP_SPIRAM);
     if (!fb2) fb2 = heap_caps_malloc(FB_SIZE / 2, MALLOC_CAP_SPIRAM);
-    if (!mem || !fb || !fb2) return false;
+    if (!glass_tmp) glass_tmp = heap_caps_malloc(120000, MALLOC_CAP_SPIRAM);
+    if (!mem || !fb || !fb2 || !glass_tmp) return false;
     asset_count = next_count; asset_bytes = next_bytes; asset_at = next_asset_at; tick_ms = 0; next_count = 0;
     if (asset_count) {
         asset = fopen(asset_path, "rb");
@@ -223,7 +226,7 @@ static bool start_source(const char *src, size_t len, const char *ns, int mode) 
         }
         if (!asset) asset_count = 0;
     }
-    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; fast_count = 0; waiting_refresh = false; injected[0] = 0;
+    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; fast_count = 0; waiting_refresh = false; injected[0] = 0; active_font = 0;
     snprintf(app_ns, sizeof app_ns, "%s", ns); refresh_mode = mode; dots_mode = mode == N4_DOTS; n4_display_tune(mode != N4_GRAY, mode == N4_TUNED);
     n4_net_app(app_ns);
     scan_store();

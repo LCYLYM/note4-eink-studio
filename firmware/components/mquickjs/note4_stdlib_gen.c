@@ -338,6 +338,15 @@ static const JSPropDef js_ui[] = {
     JS_CFUNC_DEF("present", 0, js_ui_present),
     JS_CFUNC_DEF("frame", 1, js_ui_frame),
     JS_CFUNC_DEF("tick", 1, js_ui_tick),
+    JS_CFUNC_DEF("font", 2, js_ui_font),
+    JS_CFUNC_DEF("measure", 2, js_ui_measure),
+    JS_CFUNC_DEF("mode", 0, js_ui_mode),
+    JS_CFUNC_DEF("rrect", 6, js_ui_rrect),
+    JS_CFUNC_DEF("rbox", 7, js_ui_rbox),
+    JS_CFUNC_DEF("circle", 4, js_ui_circle),
+    JS_CFUNC_DEF("line", 6, js_ui_line),
+    JS_CFUNC_DEF("grad", 7, js_ui_grad),
+    JS_CFUNC_DEF("glass", 7, js_ui_glass),
     JS_PROP_END,
 };
 static const JSClassDef js_ui_obj = JS_OBJECT_DEF("UI", js_ui);

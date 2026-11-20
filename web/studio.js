@@ -1,5 +1,5 @@
 // NOTE4 Studio v2.3: Minimalist Paper-Style E-Ink Co-Pilot, Streaming Harness & AI Push-Doc Relay.
-import {Note4Vm} from './vm.js?v=23';
+import {Note4Vm} from './vm.js?v=24';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
 
@@ -209,9 +209,14 @@ function usesRelayCode(src) {
 // ---- WASM Device Engine ----
 async function engine() {
   if (vm) return vm;
-  const [w, f] = await Promise.all([fetch('vendor/note4_vm.wasm?v=22'), fetch('vendor/font16.bin')]);
+  const [w, f, af] = await Promise.all([
+    fetch('vendor/note4_vm.wasm?v=24'),
+    fetch('vendor/font16.bin'),
+    fetch('vendor/fonts_aa.bin?v=24').catch(() => null),
+  ]);
   if (!w.ok || !f.ok) throw Error('真机预览引擎加载失败，请刷新重试');
-  return vm = await Note4Vm.create(await w.arrayBuffer(), new Uint8Array(await f.arrayBuffer()), 300);
+  const aaBytes = af && af.ok ? new Uint8Array(await af.arrayBuffer()) : undefined;
+  return vm = await Note4Vm.create(await w.arrayBuffer(), new Uint8Array(await f.arrayBuffer()), 300, aaBytes);
 }
 
 function paintCanvas(canvasId, fastMode) {
@@ -331,7 +336,7 @@ async function runHero(id = S.heroId, keepStore = false) {
   if (S.view !== 'home' || S.heroId !== id) return;
   await attachFrames(tpl);
   vm.onNet = q => pump(q);
-  vm.start(tpl.source, keepStore ? S.heroStore : {}, (tpl.refresh ?? 'fast') === 'fast', tpl.asset ? 64 : 0);
+  vm.start(tpl.source, keepStore ? S.heroStore : {}, tpl.refresh ?? 'fast', tpl.asset ? 64 : 0);
   S.heroStore = vm.store();
   vm.dirty();
   paint();
@@ -347,7 +352,7 @@ async function run(keepStore) {
   const j = S.work.spec.js;
   await attachFrames(j);
   vm.onNet = q => pump(q);
-  const code = vm.start(buildPreamble(j) + j.source, store, j.refresh === 'fast', j.asset ? 64 : j.photos?.length ?? 0);
+  const code = vm.start(buildPreamble(j) + j.source, store, j.refresh ?? 'fast', j.asset ? 64 : j.photos?.length ?? 0);
   afterRun(code, '启动');
   vm.dirty();
   animateLoop();

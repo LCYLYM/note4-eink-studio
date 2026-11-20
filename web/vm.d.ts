@@ -13,8 +13,8 @@ export declare class Note4Vm {
   gen: number;
   onFrame?: (index: number, target: Uint8Array) => void;
   onNet?: (req: Note4NetReq) => void;
-  static create(wasm: Uint8Array | WebAssembly.Module, font: Uint8Array, tickLimit?: number): Promise<Note4Vm>;
-  start(source: string, store?: Record<string, string>, fast?: boolean, frames?: number): number;
+  static create(wasm: Uint8Array | WebAssembly.Module, font: Uint8Array, tickLimit?: number, aaFont?: Uint8Array): Promise<Note4Vm>;
+  start(source: string, store?: Record<string, string>, fast?: boolean | string | number, frames?: number): number;
   tick(): number;
   tickMs(): number;
   net(key: string, status: number, body?: string): number;
@@ -22,6 +22,7 @@ export declare class Note4Vm {
   log(): string;
   clearLog(): void;
   oob(): {count: number; x: number; y: number};
+  layout(): {minX: number; minY: number; maxX: number; maxY: number; issues: {code: number; x: number; y: number; detail: number}[]} | null;
   dirty(): boolean;
   pixels(fast: boolean): Uint8Array;
   store(): Record<string, string>;

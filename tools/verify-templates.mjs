@@ -4,7 +4,9 @@ import {Note4Vm} from '../web/vm.js';
 import {JS_TEMPLATES} from '../server/src/js-templates.ts';
 const dir=decodeURIComponent(new URL('..',import.meta.url).pathname);
 const fontPath=fs.existsSync(dir+'web/vendor/font16.bin')?dir+'web/vendor/font16.bin':dir+'firmware/main/js_font16.bin';
-const vm=await Note4Vm.create(fs.readFileSync(dir+'wasm/note4_vm.wasm'),new Uint8Array(fs.readFileSync(fontPath)),300);
+const aaFontPath=fs.existsSync(dir+'firmware/main/js_fonts_aa.bin')?dir+'firmware/main/js_fonts_aa.bin':dir+'web/vendor/fonts_aa.bin';
+const aaBytes=fs.existsSync(aaFontPath)?new Uint8Array(fs.readFileSync(aaFontPath)):undefined;
+const vm=await Note4Vm.create(fs.readFileSync(dir+'wasm/note4_vm.wasm'),new Uint8Array(fs.readFileSync(fontPath)),300,aaBytes);
 const scripts={list:['ok','down','ok','down','down','down','ok','ok','down','up'],flashcards:['ok','ok','down','ok','up','ok','down','ok','down','ok','down','ok','down','ok','down','ok','down'],grid:['up','down','ok','up','down','up','down','up'],logger:['ok','down','down','ok','ok','up','down','ok','ok','up','ok']};
 const shots=[];
 const png=(W,H,gray)=>{const raw=Buffer.alloc((W+1)*H);for(let y=0;y<H;y++)for(let x=0;x<W;x++)raw[y*(W+1)+1+x]=gray(x,y);const crcT=[...Array(256)].map((_,n)=>{let c=n;for(let k=0;k<8;k++)c=c&1?0xedb88320^(c>>>1):c>>>1;return c>>>0;});const crc=b=>{let c=~0;for(const v of b)c=crcT[(c^v)&255]^(c>>>8);return ~c>>>0;};const chunk=(t,d)=>{const h=Buffer.alloc(4);h.writeUInt32BE(d.length);const b=Buffer.concat([Buffer.from(t),d]);const e=Buffer.alloc(4);e.writeUInt32BE(crc(b));return Buffer.concat([h,b,e]);};const ihdr=Buffer.alloc(13);ihdr.writeUInt32BE(W,0);ihdr.writeUInt32BE(H,4);ihdr[8]=8;return Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',ihdr),chunk('IDAT',zlib.deflateSync(raw,{level:9})),chunk('IEND',Buffer.alloc(0))]);};
@@ -15,7 +17,7 @@ const walk=['wave','down','ok','up','wave','ok','wave','down','up','ok'];
 for(const [id,t] of Object.entries(JS_TEMPLATES)){
  if(t.source.length>64*1024)throw Error(id+' too big');
  const fail=w=>{throw Error(`${id} ${w}: ${vm.log()}`);};
- if(vm.start(t.source,{},(t.refresh??'fast')==='fast',t.asset?64:0)!==0)fail('start');
+ if(vm.start(t.source,{},t.refresh??'fast',t.asset?64:0)!==0)fail('start');
  if(!vm.dirty())fail('no first draw');
  for(let round=0;round<3&&vm.netQueue.length;round++)for(const q of vm.netQueue.splice(0)){let st=0,b='';try{const r=await fetch(q.url,{method:q.method,headers:Object.fromEntries(q.headers.split('\n').filter(Boolean).map(l=>l.split(/:\s*/,2))),signal:AbortSignal.timeout(10000)});st=r.status;b=await r.text();if(Buffer.byteLength(b)>131072){st=-1;b='';}}catch(e){}console.log('  net',q.key,st,b.length,q.url.slice(0,70));if(vm.net(q.key,st,b)!==0)fail('on_net '+q.key);}
  vm.dirty();const first=vm.pixels(false).slice();shots.push(first);

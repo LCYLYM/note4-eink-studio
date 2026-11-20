@@ -401,6 +401,288 @@ function on_tick(){pull();}
 function on_start(){draw();pull();ui.tick(3600000);}
 function on_key(k){if(k==='up')S.cur=(S.cur+5)%6;else if(k==='down')S.cur=(S.cur+1)%6;else if(k==='ok')S.ai=(S.ai+1)%3;else if(k==='wave')S.rev=!S.rev;else return;save('fx',S);draw();}`;
 
+const glass_clock=`var S=load('gc',{th:0,m:25,f:4}),WK=['周日','周一','周二','周三','周四','周五','周六'];
+var QUOTES=['一寸光阴，静观纸墨流转','光影折射之间，保持内心澄明','慢下来，听见思考的声音'];
+function tstr(){var c=clock();return c.ok?pad(c.h)+':'+pad(c.mi):'18:30';}
+function dstr(){var c=clock();return c.ok?(c.y+'.'+pad(c.m)+'.'+pad(c.d)+'  '+WK[c.w]):'2026.11.20  周五';}
+function draw(){
+ var th=S.th,dark=th===1,paper=th===2;
+ if(paper){
+  ui.clear(15);
+  ui.rbox(22,20,356,260,20,10,1);
+  ui.font('sans');ui.text(42,36,dstr(),1,5);
+  var ptag='纸墨社论',ptw=ui.measure(ptag)+24;
+  ui.rrect(358-ptw,34,ptw,26,13,14);ui.text(358-ptw+12,37,ptag,1,4);
+  ui.font('display_lg');var ts=tstr(),tw0=ui.measure(ts);
+  ui.text(Math.floor((W-tw0)/2),76,ts,1,0);
+  ui.line(104,142,296,142,10,1);
+  ui.font('serif');var q=QUOTES[th%3],qw=ui.measure(q);
+  ui.text(Math.floor((W-qw)/2),162,q,1,2);
+  ui.rrect(42,216,150,44,12,14);ui.rrect(208,216,150,44,12,14);
+  ui.font('sans');
+  var s1='今日专注 '+S.f+' 次',s2='轻按切换风格';
+  ui.text(42+Math.floor((150-ui.measure(s1))/2),228,s1,1,2);
+  ui.text(208+Math.floor((150-ui.measure(s2))/2),228,s2,1,5);
+  ui.font('pixel');ui.present('clear');return;
+ }
+ if(!dark){
+  ui.grad(0,0,400,300,14,8,2);
+  ui.circle(64,56,74,4);ui.circle(344,236,90,5);ui.circle(316,58,48,15);ui.circle(110,260,44,12);
+ }else{
+  ui.grad(0,0,400,300,15,10,2);
+  ui.circle(86,70,78,6);ui.circle(324,218,86,4);ui.circle(290,64,46,12);
+ }
+ ui.glass(22,20,356,162,22,dark?2:14,7);
+ var fg=dark?15:0,sub=dark?12:4;
+ ui.font('sans');ui.text(42,36,dstr(),1,sub);
+ var tag=dark?'黑曜玻璃':'冰霜玻璃',tgw=ui.measure(tag)+24;
+ ui.rrect(358-tgw,34,tgw,26,13,dark?5:11);
+ ui.text(358-tgw+12,37,tag,1,dark?15:1);
+ ui.font('display_lg');var ts2=tstr(),tw2=ui.measure(ts2);
+ ui.text(Math.floor((W-tw2)/2),70,ts2,1,fg);
+ ui.font('serif');var q2=QUOTES[th%3],qw2=ui.measure(q2);
+ ui.text(Math.floor((W-qw2)/2),136,q2,1,sub);
+ ui.glass(22,194,172,86,18,dark?3:14,6);
+ ui.glass(206,194,172,86,18,dark?3:14,6);
+ ui.font('sans');ui.text(40,208,'今日专注',1,sub);ui.text(224,208,'轻按切风格',1,sub);
+ ui.font('display');ui.text(40,232,S.f+'x'+S.m+'m',1,fg);
+ ui.font('serif');ui.text(224,238,'16 灰精显',1,fg);
+ ui.font('pixel');ui.present('clear');
+}
+function on_start(){draw();ui.tick(60000);}
+function on_tick(){draw();}
+function on_key(k){if(k==='up'||k==='down'||k==='wave')S.th=(S.th+1)%3;else if(k==='ok')S.f=(S.f%9)+1;else return;save('gc',S);draw();}`;
+
+const glass_hub=`var S=load('gh',{tab:0,done:3,total:5,mins:75}),TABS=['专注概览','今日清单','运行状态'];
+var TODOS=['打磨 16 灰液态玻璃','验证 4 灰快刷流畅度','实机测温与功耗检查','整理视觉组件规范'];
+function draw(){
+ ui.clear(14);
+ ui.font('serif');ui.text(20,18,'NOTE4 视觉台',1,0);
+ ui.font('sans');var modeTag='4 灰快刷',mtw=ui.measure(modeTag)+22;
+ ui.rrect(380-mtw,18,mtw,26,13,5);ui.text(380-mtw+11,21,modeTag,1,15);
+ var i;for(i=0;i<3;i++){var tx=20+i*123,on=S.tab===i;ui.rrect(tx,54,114,30,15,on?0:15);if(!on)ui.rbox(tx,54,114,30,15,8,1);var tw1=ui.measure(TABS[i]);ui.text(tx+Math.floor((114-tw1)/2),59,TABS[i],1,on?15:0);}
+ ui.glass(20,96,360,152,18,15,3);
+ if(S.tab===0){
+  ui.font('display_lg');ui.text(40,112,S.mins+'m',1,0);
+  ui.font('sans');ui.text(206,116,'今日心流达成',1,5);ui.text(206,144,'完成度 '+Math.round(S.done*100/S.total)+'%',1,0);
+  ui.rrect(40,178,320,14,7,10);ui.rrect(40,178,Math.floor(320*S.done/S.total),14,7,0);
+  ui.text(40,208,'按确定 +15 分钟专注 · 上下切换面板',1,5);
+ }else if(S.tab===1){
+  ui.font('sans');
+  for(i=0;i<TODOS.length;i++){var y=112+i*31,fin=i<S.done;ui.circle(44,y+10,6,fin?0:10);ui.text(60,y,TODOS[i],1,fin?5:0);}
+ }else{
+  ui.font('display');ui.text(40,112,'0.5s',1,0);ui.text(196,112,'4-GRAY',1,0);
+  ui.font('sans');ui.text(40,164,'调优 4 灰快刷 · 无黑闪响应',1,5);ui.text(40,196,'思源黑体 + 4-bit 粗宋体抗锯齿',1,0);
+ }
+ ui.font('pixel');ui.text(20,264,'上下 切标签   确认 互动   挥手 快切',1,5);
+ ui.present();
+}
+function on_start(){draw();}
+function on_key(k){if(k==='up')S.tab=(S.tab+2)%3;else if(k==='down'||k==='wave')S.tab=(S.tab+1)%3;else if(k==='ok'){if(S.tab===0)S.mins=(S.mins+15)%180||15;else if(S.tab===1)S.done=(S.done+1)%(TODOS.length+1);else S.tab=0;}else return;save('gh',S);draw();}`;
+
+const typo_gallery=`var S=load('tg',{p:0}),NAMES=['16灰液态玻璃','字体排版对比','4灰快刷卡片','几何与渐变'];
+function draw(){
+ var p=S.p;
+ if(p===0){
+  ui.grad(0,0,400,300,14,7,2);
+  ui.circle(68,64,72,3);ui.circle(336,226,88,4);ui.circle(312,56,42,11);ui.circle(96,246,42,13);
+  ui.glass(20,20,218,166,20,14,7);
+  ui.glass(250,20,130,166,20,1,7);
+  ui.font('serif');ui.text(38,34,'液态玻璃',1,0);
+  ui.font('display_lg');ui.text(38,68,'16:48',1,0);
+  ui.font('sans');ui.text(38,128,'磨砂折射 · 柔影',1,2);ui.text(38,154,'16 级原生灰阶',1,4);
+  ui.font('sans');ui.text(266,36,'黑曜透光',1,15);
+  ui.font('display');ui.text(266,72,'24 °C',1,15);
+  ui.font('sans');ui.text(266,128,'高光折边',1,13);ui.text(266,154,'清晰反白',1,15);
+  ui.glass(20,200,360,78,18,14,6);
+  ui.font('sans');ui.text(38,214,'1/4 · 16 灰液态玻璃实机演示',1,0);
+  ui.text(38,244,'按 上 / 下 / 确定 切换 4 套视觉展板',1,4);
+ }else if(p===1){
+  ui.clear(15);
+  ui.rrect(20,18,360,36,12,14);
+  ui.font('serif');ui.text(34,24,'字体排版对比 · 2/4',1,0);
+  ui.font('pixel');ui.text(22,64,'[旧] pixel 16px: 墨水屏视觉与文字 12:34',1,5);
+  ui.line(22,88,378,88,12,1);
+  ui.font('sans');ui.text(22,96,'[新] sans 20px 黑体：清晰均衡 12:34',1,0);
+  ui.line(22,126,378,126,12,1);
+  ui.font('serif');ui.text(22,134,'[新] serif 24px 宋体：纸墨书卷气',1,0);
+  ui.line(22,170,378,170,12,1);
+  ui.font('display');ui.text(22,178,'36px: 09:41  26 °C',1,2);
+  ui.font('display_lg');ui.text(22,222,'48px: 18:30',1,0);
+ }else if(p===2){
+  ui.clear(14);
+  ui.font('serif');ui.text(20,18,'4 灰阶快刷风格 · 3/4',1,0);
+  ui.glass(20,56,174,120,16,15,3);ui.glass(206,56,174,120,16,15,3);
+  ui.font('sans');ui.text(38,70,'今日步数',1,5);ui.text(224,70,'系统内存',1,5);
+  ui.font('display');ui.text(38,98,'8,420',1,0);ui.text(224,98,'6.9M',1,0);
+  ui.rrect(38,146,138,12,6,10);ui.rrect(38,146,104,12,6,0);
+  ui.rrect(224,146,138,12,6,10);ui.rrect(224,146,92,12,6,5);
+  ui.glass(20,190,360,88,16,15,3);
+  ui.font('sans');ui.text(38,208,'0.5 秒无黑闪，4 级真灰保留层次',1,0);
+  ui.text(38,240,'适合仪表盘、日程与日常高频交互',1,5);
+ }else{
+  ui.clear(15);
+  ui.font('serif');ui.text(20,18,'16 灰阶光影与几何 · 4/4',1,0);
+  ui.grad(20,56,360,44,0,15,1);ui.rbox(20,56,360,44,0,5,1);
+  ui.font('sans');ui.text(34,68,'0 黑 · 连续微抖动',1,15);
+  var rlbl='15 白',rw=ui.measure(rlbl);
+  ui.text(366-rw,68,rlbl,1,0);
+  ui.circle(80,166,46,13);ui.circle(80,166,32,9);ui.circle(80,166,16,3);
+  ui.line(80,166,104,146,15,2);ui.line(80,166,80,132,0,2);
+  ui.glass(150,114,230,102,18,14,6);
+  ui.font('serif');ui.text(168,128,'原生圆角与抗锯齿',1,0);
+  ui.font('sans');ui.text(168,162,'rrect / circle / line',1,3);
+  ui.text(168,186,'glass 自动适配多波形',1,5);
+  ui.rrect(20,232,360,46,14,14);ui.rbox(20,232,360,46,14,10,1);
+  ui.font('sans');ui.text(38,245,'上 / 下 / 确定 循环查看 4 套展板',1,2);
+ }
+ ui.font('pixel');ui.present('clear');
+}
+function on_start(){draw();}
+function on_key(k){if(k==='up')S.p=(S.p+3)%4;else if(k==='down'||k==='ok'||k==='wave')S.p=(S.p+1)%4;else return;save('tg',S);draw();}`;
+
+const zen_breath=`var MODES=[['方盒专注',[4,4,4,4],['吸气','屏息','呼气','屏息']],['4-7-8 助眠',[4,7,8],['慢吸','静屏','长呼']],['5-5 放松',[5,5],['深吸','缓呼']]];
+var S=load('zb',{m:0,ph:0,rem:4,run:false});
+function draw(){
+ var md=MODES[S.m],dur=md[1][S.ph],lbl=md[2][S.ph];
+ ui.grad(0,0,400,300,15,9,2);
+ // Concentric 16-gray breathing halo (expands on inhale, holds full, softens on exhale)
+ var prog=S.ph===0?1-(S.rem-1)/Math.max(1,dur):S.ph===1&&md[1].length>2?1:(S.rem)/Math.max(1,dur);
+ var rOuter=Math.round(52+prog*22),rMid=Math.round(rOuter*0.68),rCore=Math.round(rOuter*0.36);
+ ui.circle(106,118,rOuter,12);ui.circle(106,118,rMid,8);ui.circle(106,118,rCore,3);
+ ui.circle(106,118,8,15);
+ ui.glass(198,22,180,184,20,14,7);
+ ui.font('sans');ui.text(216,38,md[0],1,4);
+ ui.font('serif');ui.text(216,68,lbl,1,0);
+ ui.font('display_lg');ui.text(216,104,pad(S.rem)+'s',1,0);
+ var i,n=md[1].length,dw=Math.floor((144-(n-1)*8)/n);
+ for(i=0;i<n;i++)ui.rrect(216+i*(dw+8),174,dw,10,5,i===S.ph?0:11);
+ ui.glass(22,220,356,58,16,14,6);
+ ui.font('sans');var hint=S.run?'按确定 暂停 · 上下 换节律':'按确定 开始呼吸 · 上下 换节律';
+ ui.text(40,239,hint,1,2);
+ ui.font('pixel');ui.present('clear');
+}
+function step(){var md=MODES[S.m];S.rem--;if(S.rem<=0){S.ph=(S.ph+1)%md[1].length;S.rem=md[1][S.ph];}}
+function on_start(){draw();ui.tick(S.run?2000:0);}
+function on_tick(){if(!S.run)return;step();draw();}
+function on_key(k){
+ if(k==='up'){S.m=(S.m+MODES.length-1)%MODES.length;S.ph=0;S.rem=MODES[S.m][1][0];S.run=false;ui.tick(0);}
+ else if(k==='down'){S.m=(S.m+1)%MODES.length;S.ph=0;S.rem=MODES[S.m][1][0];S.run=false;ui.tick(0);}
+ else if(k==='ok'){S.run=!S.run;if(!S.run)ui.tick(0);else ui.tick(2000);}
+ else if(k==='wave'){step();}
+ else return;
+ save('zb',S);draw();
+}`;
+
+const studio_weather=`var CITIES=[['北京',39.9,116.4,22,13,25,0,12,42],['上海',31.2,121.5,24,17,27,2,15,61],['杭州',30.3,120.2,23,15,26,1,11,58],['深圳',22.5,114.1,28,23,31,2,14,72],['成都',30.6,104.1,20,14,23,3,8,68]];
+var S=load('sw',{i:0}),D={},WK=['周日','周一','周二','周三','周四','周五','周六'];
+function wname(c){if(c===0)return '晴朗';if(c<=2)return '多云';if(c<=3)return '阴天';if(c<=48)return '轻雾';if(c<=67)return '小雨';if(c<=77)return '微雪';return '阵雨';}
+function icon(cx,cy,c){
+ if(c===0){ui.circle(cx,cy,14,2);ui.circle(cx,cy,9,14);ui.line(cx,cy-22,cx,cy-17,2,2);ui.line(cx,cy+17,cx,cy+22,2,2);ui.line(cx-22,cy,cx-17,cy,2,2);ui.line(cx+17,cy,cx+22,cy,2,2);}
+ else if(c<=3){ui.circle(cx-6,cy+4,11,5);ui.circle(cx+6,cy+2,13,3);ui.rrect(cx-16,cy+4,32,12,6,4);}
+ else{ui.circle(cx-5,cy-2,10,4);ui.circle(cx+6,cy-4,12,2);ui.rrect(cx-15,cy-2,30,10,5,3);ui.line(cx-8,cy+12,cx-11,cy+20,2,2);ui.line(cx+1,cy+12,cx-2,cy+20,2,2);ui.line(cx+10,cy+12,cx+7,cy+20,2,2);}
+}
+function draw(){
+ var c=CITIES[S.i],d=D[S.i];
+ var cur=d?d.cur:c[3],wc=d?d.wc:c[6],wd=d?d.wd:c[7],hm2=d?d.hm:c[8];
+ var f3=d?d.f3:[['明天',c[6],c[4],c[5]],['后天',Math.min(3,c[6]+1),c[4]-1,c[5]-1],['大后天',0,c[4]+1,c[5]+2]];
+ ui.grad(0,0,400,300,14,8,2);
+ ui.circle(72,56,66,4);ui.circle(344,228,82,5);ui.circle(310,58,42,15);
+ ui.glass(20,20,360,152,22,14,7);
+ ui.font('serif');ui.text(38,34,c[0]+' · '+wname(wc),1,0);
+ ui.font('sans');var tag=d?'实时气象':'示例天气',tgw=ui.measure(tag)+22;
+ ui.rrect(362-tgw,34,tgw,26,13,11);ui.text(362-tgw+11,37,tag,1,1);
+ ui.font('display_lg');ui.text(38,76,cur+' °C',1,0);
+ icon(206,116,wc);
+ ui.font('sans');
+ var wl='风速 '+wd+' km/h',hl='湿度 '+hm2+' %';
+ ui.text(362-ui.measure(wl),94,wl,1,4);ui.text(362-ui.measure(hl),124,hl,1,4);
+ var k;for(k=0;k<3;k++){
+  var bx=20+k*124,row=f3[k];
+  ui.glass(bx,186,112,94,18,14,6);
+  ui.font('sans');var n1=row[0];ui.text(bx+Math.floor((112-ui.measure(n1))/2),198,n1,1,4);
+  ui.font('serif');var n2=wname(row[1]);ui.text(bx+Math.floor((112-ui.measure(n2))/2),222,n2,1,0);
+  ui.font('sans');var n3=row[2]+'° / '+row[3]+'°';ui.text(bx+Math.floor((112-ui.measure(n3))/2),250,n3,1,3);
+ }
+ ui.font('pixel');ui.present('clear');
+}
+function pull(){var c=CITIES[S.i];net.request({key:'w'+S.i,url:'https://api.open-meteo.com/v1/forecast?latitude='+c[1]+'&longitude='+c[2]+'&current=temperature_2m,relative_humidity_2m,weather_code,wind_speed_10m&daily=weather_code,temperature_2m_max,temperature_2m_min&timezone=Asia%2FShanghai&forecast_days=4'});}
+function on_net(k,st,b){
+ var idx=+k.slice(1),j=parse(st,b),cu=j&&j.current,dl=j&&j.daily;if(!cu||!dl)return;
+ var c0=clock(),f3=[],n;for(n=1;n<=3&&n<dl.time.length;n++){var lbl=n===1?'明天':(c0.ok?WK[(c0.w+n)%7]:(n===2?'后天':'大后天'));f3.push([lbl,dl.weather_code[n],Math.round(dl.temperature_2m_min[n]),Math.round(dl.temperature_2m_max[n])]);}
+ D[idx]={cur:Math.round(cu.temperature_2m),wc:cu.weather_code,wd:Math.round(cu.wind_speed_10m),hm:Math.round(cu.relative_humidity_2m),f3:f3};
+ if(idx===S.i)draw();
+}
+function on_start(){draw();pull();ui.tick(1800000);}
+function on_tick(){pull();}
+function on_key(k){if(k==='up')S.i=(S.i+CITIES.length-1)%CITIES.length;else if(k==='down'||k==='wave')S.i=(S.i+1)%CITIES.length;else if(k==='ok'){pull();return;}else return;save('sw',S);draw();if(!D[S.i])pull();}`;
+
+const paper_quote=`var Q=[
+ ['慢下来，','听见思考的声音','纸墨随笔'],
+ ['人间有味是清欢，','且把浮名换浅斟','苏轼'],
+ ['一寸光阴一寸心，','静观云卷与风轻','桌面日签'],
+ ['好的设计，','是尽可能少的设计','Dieter Rams'],
+ ['生活是很好玩的，','只要你不急着赶路','汪曾祺'],
+ ['把时间还给专注，','把喧嚣留给窗外','静心录'],
+ ['万物皆有裂痕，','那是光照进来的地方','Leonard Cohen'],
+ ['知止而后有定，','定而后能静','大学']
+];
+var S=load('pq',{i:0,dark:false}),WK=['周日','周一','周二','周三','周四','周五','周六'];
+function dstr(){var c=clock();return c.ok?(c.y+'.'+pad(c.m)+'.'+pad(c.d)+' · '+WK[c.w]):'2026.11.20 · 周五';}
+function draw(){
+ var d=S.dark,bg=d?1:15,fg=d?15:0,sub=d?11:5,pill=d?3:14,rim=d?5:11,q=Q[S.i];
+ ui.clear(bg);
+ ui.rbox(22,20,356,260,20,rim,1);
+ ui.font('sans');ui.text(42,36,dstr(),1,sub);
+ var tag=d?'墨夜一签':'纸墨一签',tw1=ui.measure(tag)+24;
+ ui.rrect(358-tw1,34,tw1,26,13,pill);ui.text(358-tw1+12,37,tag,1,d?14:3);
+ ui.line(42,72,358,72,rim,1);
+ ui.font('serif');
+ var w1=ui.measure(q[0]),w2=ui.measure(q[1]);
+ ui.text(Math.floor((W-w1)/2),98,q[0],1,fg);
+ ui.text(Math.floor((W-w2)/2),134,q[1],1,fg);
+ ui.font('sans');var au='—— '+q[2],aw=ui.measure(au);
+ ui.text(Math.floor((W-aw)/2),178,au,1,sub);
+ ui.rrect(42,218,150,42,12,pill);ui.rrect(208,218,150,42,12,pill);
+ var l1='第 '+(S.i+1)+' / '+Q.length+' 签',l2=d?'按确定 切亮纸':'按确定 切墨夜';
+ ui.text(42+Math.floor((150-ui.measure(l1))/2),229,l1,1,d?14:2);
+ ui.text(208+Math.floor((150-ui.measure(l2))/2),229,l2,1,sub);
+ ui.font('pixel');ui.present('clear');
+}
+function on_start(){draw();}
+function on_key(k){if(k==='up')S.i=(S.i+Q.length-1)%Q.length;else if(k==='down'||k==='wave')S.i=(S.i+1)%Q.length;else if(k==='ok')S.dark=!S.dark;else return;save('pq',S);draw();}`;
+
+const focus_deck=`var S=load('fd',{sec:1500,brk:false,run:false,done:4});
+function draw(){
+ var tot=S.brk?300:1500,el=tot-S.sec,mm=Math.floor(S.sec/60),ss=S.sec%60;
+ ui.clear(14);
+ ui.glass(20,20,224,218,18,15,3);
+ ui.font('serif');ui.text(38,36,S.brk?'轻度休息':'深度专注',1,0);
+ ui.font('sans');var st=S.run?'进行中':'已暂停',stw=ui.measure(st)+20;
+ ui.rrect(226-stw,36,stw,26,13,S.run?0:10);ui.text(226-stw+10,39,st,1,S.run?15:0);
+ ui.font('display_lg');ui.text(38,84,pad(mm)+':'+pad(ss),1,0);
+ ui.rrect(38,158,188,14,7,10);
+ var fw=Math.floor(188*el/tot);if(fw>8)ui.rrect(38,158,fw,14,7,0);
+ ui.font('sans');ui.text(38,194,S.brk?'5 分钟放松目力':'25 分钟心流时段',1,5);
+ ui.glass(256,20,124,103,18,15,3);
+ ui.font('sans');ui.text(274,34,'今日番茄',1,5);
+ ui.font('display');ui.text(274,64,pad(S.done),1,0);
+ ui.glass(256,135,124,103,18,15,3);
+ ui.font('sans');ui.text(274,149,'当前状态',1,5);
+ ui.font('serif');ui.text(274,182,S.brk?'休整中':'专注中',1,0);
+ ui.font('pixel');ui.text(20,258,'确认 开始/暂停   上 切休息   下 重置',1,5);
+ ui.present();
+}
+function on_start(){draw();ui.tick(S.run?5000:0);}
+function on_tick(){if(!S.run)return;S.sec-=5;if(S.sec<=0){if(!S.brk)S.done++;S.brk=!S.brk;S.sec=S.brk?300:1500;S.run=false;ui.tick(0);}save('fd',S);draw();}
+function on_key(k){
+ if(k==='ok'||k==='wave'){S.run=!S.run;ui.tick(S.run?5000:0);}
+ else if(k==='up'){S.brk=!S.brk;S.sec=S.brk?300:1500;S.run=false;ui.tick(0);}
+ else if(k==='down'){S.sec=S.brk?300:1500;S.run=false;ui.tick(0);}
+ else return;
+ save('fd',S);draw();
+}`;
+
 const cat={
  relay:'电脑同步',
  work:'效率专注',
@@ -411,6 +693,14 @@ const cat={
 const g=(id:string,c:string,title:string,use:string,refresh:string,code:string,extra:any={})=>({id,cat:c,title,use,refresh,conn_mode:'local',wave_act:'快捷操作',code,...extra});
 
 export const GALLERY=[
+ // 0. 视觉与液态玻璃展厅 (v1.8 Visual Craft!)
+ g('typo_gallery',cat.home,'视觉与字体展厅','一屏实机对比 16 灰液态玻璃、新黑体/宋体抗锯齿、4 灰快刷与微抖动渐变','clear',typo_gallery,{conn_mode:'local',wave_act:'切换下一展板'}),
+ g('glass_clock',cat.home,'液态玻璃时钟','16 灰原生磨砂透光玻璃卡片配 48px 几何大时钟，支持冰霜/黑曜/纸墨三风格','clear',glass_clock,{conn_mode:'local',wave_act:'切换玻璃风格'}),
+ g('studio_weather',cat.board,'液态玻璃天气画报','16 灰磨砂主卡配 48px 超大温度与三日玻璃预报，免配置直连实时气象','clear',studio_weather,{conn_mode:'public',wave_act:'切换下个城市'}),
+ g('paper_quote',cat.home,'纸墨每日一签','Kindle 杂志社论风 4-bit 粗宋体金句日签，支持亮纸与墨夜双主题','clear',paper_quote,{conn_mode:'local',wave_act:'翻看下一签'}),
+ g('zen_breath',cat.home,'静心呼吸引导','16 灰同心呼吸光晕配液态玻璃倒计时，内置 4-4-4-4 与 4-7-8 呼吸节律','clear',zen_breath,{conn_mode:'local',wave_act:'切入下一拍'}),
+ g('focus_deck',cat.work,'4灰专注仪表台','TRMNL 风格 0.5 秒 4 灰快刷番茄台，超大等宽倒计时配今日统计卡片','tuned',focus_deck,{conn_mode:'local',wave_act:'开始或暂停'}),
+ g('glass_hub',cat.work,'4灰阶快刷仪表盘','0.5 秒 4 灰快刷下用柔影玻璃卡与新抗锯齿黑体打造现代桌面看板','tuned',glass_hub,{conn_mode:'local',wave_act:'切换看板标签'}),
  // 1. 内网中转与遥控 (Platform Relay Hub showcase!)
  g('relay_board',cat.relay,'云端桌贴','从内网电脑或手机发一句话直达桌面，挥手盖章「已阅」回传电脑','fast',relay_board,{conn_mode:'relay',wave_act:'盖章回传已阅'}),
  g('claude_hud',cat.relay,'AI 任务盯盘','盯盘内网 Claude 或训练任务进度，墨水屏挥手一键拍板放行','fast',claude_hud,{conn_mode:'relay',wave_act:'批准继续执行'}),
