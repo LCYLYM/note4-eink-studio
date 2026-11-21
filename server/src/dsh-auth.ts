@@ -44,10 +44,24 @@ export function maskToken(kind: string, token: string): string {
 }
 
 function isPrivateOrLocalHost(host: string): boolean {
-  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
-  if (!h || h === 'localhost' || h === '::1' || h === '0.0.0.0' || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '').replace(/\.+$/, '');
+  if (!h || h === 'localhost' || h === '::1' || h === '::' || h === '0.0.0.0' || h.endsWith('.local') || h.endsWith('.internal')) return true;
   if (/^(fc|fd|fe80):/i.test(h)) return true;
-  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  // WHATWG URL normalizes IPv4-mapped IPv6 to ::ffff:XXXX:XXXX hex — unwrap it (and the
+  // deprecated ::/96 compatible form) so the IPv4 range table still applies.
+  let v4 = h;
+  const mapped = h.match(/^::ffff:([0-9a-f]{1,4}):([0-9a-f]{1,4})$/) || h.match(/^::ffff:(\d{1,3}(?:\.\d{1,3}){3})$/);
+  const compat = h.match(/^::([0-9a-f]{1,4}):([0-9a-f]{1,4})$/) || h.match(/^::(\d{1,3}(?:\.\d{1,3}){3})$/);
+  const embedded = mapped || compat;
+  if (embedded) {
+    if (embedded.length === 3) {
+      const hi = parseInt(embedded[1], 16), lo = parseInt(embedded[2], 16);
+      v4 = `${hi >> 8}.${hi & 255}.${lo >> 8}.${lo & 255}`;
+    } else {
+      v4 = embedded[1];
+    }
+  }
+  const m = v4.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
   if (!m) return false;
   const [a, b] = [Number(m[1]), Number(m[2])];
   return (
