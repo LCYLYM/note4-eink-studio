@@ -29,7 +29,7 @@
 #define FULL_REFRESH_EVERY 30 // partial refreshes before a black-flash rebase clears ghosting
 
 #define FONT16_RAW_BYTES 679904u
-#define FONTS_AA_RAW_BYTES 923124u
+#define FONTS_AA_RAW_BYTES 1839440u
 extern const uint8_t font_zz_start[] asm("_binary_js_font16_bin_zz_start");
 extern const uint8_t font_zz_end[] asm("_binary_js_font16_bin_zz_end");
 extern const uint8_t aa_font_zz_start[] asm("_binary_js_fonts_aa_bin_zz_start");
@@ -287,7 +287,54 @@ bool js_app_load_file(const char *path, uint32_t offset, uint32_t size, const ch
     free(src);
     return ok;
 }
-void js_app_stop(void) { flush_pending(); ag_reset_state(); tick_ms = 0; if (asset) { fclose(asset); asset = NULL; } free(frame_table); free(frame_packed); free(frame_decoder); frame_table = NULL; frame_packed = NULL; frame_decoder = NULL; if (ctx) { JS_FreeContext(ctx); ctx = NULL; n4_net_app(""); printf("NOTE4 JS {\"call\":\"closed\"}\n"); } }
+static char hud_banner[96];
+static int hud_icon_kind = 0; // 1=solid dot (rec), 2=ring (work), 3=bars (speak)
+
+static inline void fb2_set(int x, int y, unsigned q) {
+    if (!fb2 || x < 0 || y < 0 || x >= 400 || y >= 300) return;
+    int idx = (y * 400 + x) >> 2, sh = 6 - ((x & 3) << 1);
+    fb2[idx] = (uint8_t)((fb2[idx] & ~(3u << sh)) | ((q & 3u) << sh));
+}
+static void pack_fb2_with_hud(void) {
+    for (int i = 0; i < FB_SIZE / 2; i++) {
+        unsigned out = 0;
+        for (int k = 0; k < 4; k++) { int p = i * 4 + k; unsigned g = (p & 1) ? fb[p / 2] & 15 : fb[p / 2] >> 4; out |= ((g + 2) / 5) << (6 - 2 * k); }
+        fb2[i] = (uint8_t)out;
+    }
+    if (!hud_banner[0]) return;
+    size_t blen = strlen(hud_banner);
+    int tw = 0;
+    for (size_t i = 0; i < blen;) { uint32_t cp = next_utf8(hud_banner, blen, &i); tw += (cp < 128 ? 9 : 16); }
+    if (tw > 316) tw = 316;
+    int pw = tw + 46, ph = 28, px0 = (400 - pw) / 2, py0 = 228;
+    for (int y = py0 - 2; y < py0 + ph + 2; y++)
+        for (int x = px0 - 2; x < px0 + pw + 2; x++) {
+            bool outer = (x < px0 || x >= px0 + pw || y < py0 || y >= py0 + ph);
+            bool ring = !outer && (x == px0 + 1 || x == px0 + pw - 2 || y == py0 + 1 || y == py0 + ph - 2);
+            fb2_set(x, y, (outer || ring) ? 3u : 0u);
+        }
+    int cx = px0 + 16, cy = py0 + 14;
+    for (int dy = -5; dy <= 5; dy++)
+        for (int dx = -5; dx <= 5; dx++) {
+            int r2 = dx * dx + dy * dy;
+            if (hud_icon_kind == 1 && r2 <= 25) fb2_set(cx + dx, cy + dy, 3u);
+            else if (hud_icon_kind == 2 && r2 >= 11 && r2 <= 27) fb2_set(cx + dx, cy + dy, 3u);
+            else if (hud_icon_kind == 3 && (dx == -4 || dx == 0 || dx == 4) && dy >= -4 && dy <= 4) fb2_set(cx + dx, cy + dy, 3u);
+        }
+    int tx = px0 + 30, ty = py0 + 6;
+    for (size_t i = 0; i < blen && tx + 16 <= px0 + pw - 8;) {
+        uint32_t cp = next_utf8(hud_banner, blen, &i);
+        const uint8_t *m = glyph(cp);
+        if (m) {
+            for (int yy = 0; yy < 16; yy++)
+                for (int xx = 0; xx < 16; xx++)
+                    if (m[yy * 2 + (xx >> 3)] & (128 >> (xx & 7))) fb2_set(tx + xx, ty + yy, 3u);
+        }
+        tx += (cp < 128 ? 9 : 16);
+    }
+}
+
+void js_app_stop(void) { hud_banner[0] = 0; flush_pending(); ag_reset_state(); tick_ms = 0; if (asset) { fclose(asset); asset = NULL; } free(frame_table); free(frame_packed); free(frame_decoder); frame_table = NULL; frame_packed = NULL; frame_decoder = NULL; if (ctx) { JS_FreeContext(ctx); ctx = NULL; n4_net_app(""); printf("NOTE4 JS {\"call\":\"closed\"}\n"); } }
 void js_app_inject(const char *key) { snprintf(injected, sizeof injected, "%s", key); }
 void js_app_tick(uint32_t bits) {
     if (!ctx) return;
@@ -305,20 +352,19 @@ void js_app_tick(uint32_t bits) {
     if (tick_ms && !dirty && now >= next_tick) { next_tick = now + tick_ms; quiet = true; call("on_tick", NULL); quiet = false; if (!ctx) return; }
     if (waiting_refresh && last_busy >= present_at && now - last_busy > 400) { waiting_refresh = false; printf("NOTE4 JS {\"settle_ms\":%" PRId64 "}\n", last_busy - present_at); }
     if (dirty) {
-        if (force_clear || refresh_mode == N4_CLEAR) {
+        if (!hud_banner[0] && (force_clear || refresh_mode == N4_CLEAR)) {
             if (!busy && n4_display_card(fb, FB_SIZE)) { dirty = false; force_clear = false; fast_count = 0; printf("NOTE4 JS {\"full_refresh\":true}\n"); waiting_refresh = true; present_at = now; }
         } else if (!(((fast_count >= FULL_REFRESH_EVERY && (!tick_ms || tick_ms >= 1000)) || refresh_mode == N4_FLASH) && busy)) {
-            // Same 4bpp-to-2bpp mapping as the native runner, then the partial-refresh path.
-            for (int i = 0; i < FB_SIZE / 2; i++) { unsigned out = 0; for (int k = 0; k < 4; k++) { int p = i * 4 + k; unsigned g = (p & 1) ? fb[p / 2] & 15 : fb[p / 2] >> 4; out |= ((g + 2) / 5) << (6 - 2 * k); } fb2[i] = out; }
-            bool rebase = (fast_count >= FULL_REFRESH_EVERY && (!tick_ms || tick_ms >= 1000)) || refresh_mode == N4_FLASH;
+            pack_fb2_with_hud();
+            bool rebase = !hud_banner[0] && ((fast_count >= FULL_REFRESH_EVERY && (!tick_ms || tick_ms >= 1000)) || refresh_mode == N4_FLASH);
             if (rebase) { n4_display_rebase(); printf("NOTE4 JS {\"rebase\":true}\n"); }
             if (n4_display_frame(fb2, FB_SIZE / 2)) { dirty = false; fast_count = rebase ? 0 : fast_count + 1; waiting_refresh = true; present_at = now; }
         }
     }
-    if (npending && !busy && now - last_set_ms > FLUSH_DELAY_MS) flush_pending();
+    if (npending && !hud_banner[0] && !busy && now - last_set_ms > FLUSH_DELAY_MS) flush_pending();
 }
 
-// A-Core pre-turn store snapshot (<=16 KiB PSRAM) & declarative Agent bridge
+// A-Core pre-turn store snapshot (<=16 KiB PSRAM, zero synchronous SPIFFS stall!) & declarative Agent bridge
 typedef struct { char path[44]; char *data; size_t len; } snap_entry_t;
 static snap_entry_t turn_snap[8];
 static int nturn_snap = 0;
@@ -328,14 +374,24 @@ static void free_turn_snap(void) {
     nturn_snap = 0;
 }
 void js_agent_store_begin_turn(void) {
-    flush_pending();
     free_turn_snap();
+    for (int i = 0; i < npending && nturn_snap < 8; i++) {
+        char *buf = heap_caps_malloc(pending[i].len, MALLOC_CAP_SPIRAM);
+        if (buf) {
+            memcpy(buf, pending[i].data, pending[i].len);
+            snprintf(turn_snap[nturn_snap].path, sizeof turn_snap[0].path, "%.43s", pending[i].path);
+            turn_snap[nturn_snap].data = buf;
+            turn_snap[nturn_snap].len = pending[i].len;
+            nturn_snap++;
+        }
+    }
     char prefix[16]; int plen = snprintf(prefix, sizeof prefix, "jsk_%s_", app_ns);
     DIR *d = opendir("/data"); if (!d) return;
     struct dirent *e; size_t total = 0;
     while ((e = readdir(d)) && nturn_snap < 8) {
         if (strncmp(e->d_name, prefix, plen)) continue;
         char path[64]; snprintf(path, sizeof path, "/data/%.40s", e->d_name);
+        if (find_pending(path)) continue;
         struct stat st; if (stat(path, &st) != 0 || st.st_size <= 0 || st.st_size > VALUE_MAX || total + (size_t)st.st_size > 16384) continue;
         FILE *f = fopen(path, "rb"); if (!f) continue;
         char *buf = heap_caps_malloc((size_t)st.st_size, MALLOC_CAP_SPIRAM);
@@ -349,7 +405,7 @@ void js_agent_store_begin_turn(void) {
     }
     closedir(d);
 }
-void js_agent_store_commit_turn(void) { flush_pending(); free_turn_snap(); }
+void js_agent_store_commit_turn(void) { last_set_ms = mono_ms(); free_turn_snap(); }
 void js_agent_store_rollback_turn(void) {
     for (int i = 0; i < npending; i++) { free(pending[i].data); pending[i].data = NULL; }
     npending = 0;
@@ -368,8 +424,31 @@ bool js_agent_call_tool(const char *name, const char *args_json, char *out, size
     return ag_invoke_helper("callTool", name, args_json ? args_json : "{}", -1, out, cap);
 }
 void js_agent_emit(const char *phase, const char *text) {
-    ag_utf8_clip(phase ? phase : "idle", phase ? strlen(phase) : 4, ag_status_str, sizeof(ag_status_str));
+    const char *ph = phase ? phase : "idle";
+    ag_utf8_clip(ph, strlen(ph), ag_status_str, sizeof(ag_status_str));
+    if (!strcmp(ph, "listening")) {
+        hud_icon_kind = 1;
+        bool is_long = text && strncmp(text, "长录", 6) == 0;
+        snprintf(hud_banner, sizeof hud_banner, "%s", is_long ? "长录中，单击确认结束" : "录音中，松开发送");
+    } else if (!strcmp(ph, "uploading")) {
+        hud_icon_kind = 2;
+        snprintf(hud_banner, sizeof hud_banner, "%s", "正在识别语音");
+    } else if (!strcmp(ph, "thinking")) {
+        hud_icon_kind = 2;
+        snprintf(hud_banner, sizeof hud_banner, "%s", "正在思考处理");
+    } else if (!strcmp(ph, "speaking")) {
+        hud_icon_kind = 3;
+        snprintf(hud_banner, sizeof hud_banner, "%s", "播报中，按住可插话");
+    } else if (!strcmp(ph, "error")) {
+        hud_icon_kind = 2;
+        snprintf(hud_banner, sizeof hud_banner, "%s", (text && text[0]) ? text : "语音请求异常");
+    } else {
+        if (hud_banner[0] && npending) last_set_ms = mono_ms();
+        hud_icon_kind = 0;
+        hud_banner[0] = 0;
+    }
     ag_invoke_helper("emit", ag_status_str, text ? text : "", -1, NULL, 0);
+    dirty = true;
 }
 bool js_agent_take_say(char *out, size_t cap) {
     if (!ag_say_pending) return false;

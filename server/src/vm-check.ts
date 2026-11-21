@@ -1,6 +1,7 @@
 import wasm from '../../wasm/note4_vm.wasm';
 import {Note4Vm} from '../../web/vm.js';
 import {fontData} from './font';
+import {ensureVoiceComponentSource, buildFontPreamble} from './compiler';
 import {existsSync, readFileSync} from 'node:fs';
 
 // wasm takes about 8 ms on the benchmark the device runs in 292 ms.
@@ -36,8 +37,20 @@ function sketch(px: Uint8Array) {
   return rows.join('\n');
 }
 
-const fail = (where: string, log: string) => {
-  throw Error(`JS ${where} failed on the device engine: ${log.trim().slice(0, 600)}`);
+const fail = (where: string, log: string, srcForCtx?: string) => {
+  let msg = `JS ${where} failed on the device engine: ${log.trim().slice(0, 500)}`;
+  const m = srcForCtx ? log.match(/app\.js:(\d+)(?::(\d+))?/) : null;
+  if (m && srcForCtx) {
+    const ln = Number(m[1]), lines = srcForCtx.split('\n');
+    const lo = Math.max(1, ln - 1), hi = Math.min(lines.length, ln + 1);
+    const snip = [];
+    for (let i = lo; i <= hi; i++) snip.push(`${i === ln ? '>' : ' '}${i}: ${(lines[i - 1] ?? '').slice(0, 180)}`);
+    msg += `\nOffending source lines:\n${snip.join('\n')}`;
+    if (/unexpected character/i.test(log) && /[^\x00-\x7f]/.test(lines[ln - 1] ?? '')) {
+      msg += `\nHint: MicroQuickJS (strict ES5) identifiers and unquoted object keys MUST be ASCII (a-zA-Z0-9_$); quote Chinese keys like {'主题': val} or use ASCII keys like {topic: val}!`;
+    }
+  }
+  throw Error(msg);
 };
 
 export type MockNetMap = Record<string, {status?: number; body?: unknown}>;
@@ -56,17 +69,18 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
   const keys = ['ok', 'up', 'down', 'ok', 'down', 'up', ...(spec.js.wave ? ['wave'] : [])];
   const frames = spec.js.asset ? 64 : (spec.js.photos?.length ?? 0);
   let slowest = 0;
-  const timed = (fn: () => number, where: string, retryOnJitter = false) => {
+  const jsSrc = buildFontPreamble(spec.js.font) + ensureVoiceComponentSource(spec.js.source);
+  const timed = (fn: () => number, where: string, retryOnJitter = false, ctxSrc = jsSrc) => {
     v.clearLog();
     const t = performance.now(), r = fn();
     let ms = (performance.now() - t) * DEVICE_SLOWDOWN;
-    if (r !== 0) fail(where, v.log());
+    if (r !== 0) fail(where, v.log(), ctxSrc);
     if (ms > DEVICE_LIMIT_MS && retryOnJitter && ms < 60000) {
       // Single idempotent retry filters out transient Node GC / OS scheduler hiccups.
       v.clearLog();
       const t2 = performance.now(), r2 = fn();
       const ms2 = (performance.now() - t2) * DEVICE_SLOWDOWN;
-      if (r2 !== 0) fail(where, v.log());
+      if (r2 !== 0) fail(where, v.log(), ctxSrc);
       ms = Math.min(ms, ms2);
     }
     slowest = Math.max(slowest, ms);
@@ -116,7 +130,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
 
   // 1. Offline + interactive check
   const mode = spec.js.refresh ?? 'fast';
-  timed(() => v.start(spec.js.source, {}, mode, frames), 'on_start', true);
+  timed(() => v.start(jsSrc, {}, mode, frames), 'on_start', true);
   if (!v.dirty()) throw Error('on_start must draw the first screen and call ui.present()');
   mergeLayout('on_start');
   const first = sketch(v.pixels(false));
@@ -154,7 +168,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       (spec.js.conn_mode === 'apikey'
         ? 'var SECRET="sandbox-mock-key";\n'
         : 'var SECRET="https://sandbox.note4.invalid/api/relay/mock";\n');
-    timed(() => v.start(mockPreamble + spec.js.source, {}, mode, frames), 'on_start(mock_net)', true);
+    timed(() => v.start(mockPreamble + jsSrc, {}, mode, frames), 'on_start(mock_net)', true);
     v.dirty();
     const queued = v.netQueue.splice(0);
     for (const q of queued) {
@@ -180,7 +194,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
   // 3. Declarative Voice Agent (agent.config) tool-probe & Finish Gate verification
   let agentToolsProbed = 0;
   let agentRole = '';
-  timed(() => v.start(spec.js.source, {}, mode, frames), 'on_start(agent_probe)', true);
+  timed(() => v.start(jsSrc, {}, mode, frames), 'on_start(agent_probe)', true);
   v.dirty();
   const agInfo = (v as any).agent?.() ?? {configured: false, toolCount: 0, role: '', tools: []};
   if (spec.js.voice && spec.js.voice.mode && spec.js.voice.mode !== 'off' && !agInfo.configured) {

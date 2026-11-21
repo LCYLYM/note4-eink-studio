@@ -1,4 +1,4 @@
-import {AGENT_LIMITS, StreamDelta} from './model-router';
+import {AGENT_LIMITS, StreamDelta, UserModelRuntime} from './model-router';
 import {buildStaticSystemPrompt} from './skills';
 import {JS_TEMPLATES, pickTemplate} from './js-templates';
 import {suggestPublicApiHint} from './public-apis';
@@ -14,7 +14,14 @@ function parseToolArgs(raw: unknown): Record<string, any> {
   return JSON.parse(text);
 }
 
-export async function runAgent(s: any, task: any, auth: any) {
+const isPureQuestion = (m: string) => {
+  const s = String(m || '').trim();
+  if (!s || s.length > 60) return false;
+  if (/做|写|建|生成|改|加|删|换|把|调|修复|接入|设计/.test(s) && !/可以做|能做|能干|可以干|支持做/.test(s)) return false;
+  return /你可以|你能|你会|干什么|做什么|干啥|做啥|怎么用|如何使用|有哪些功能|支持什么|是什么|介绍|推荐几个|怎么玩|怎么连|怎么发/.test(s);
+};
+
+export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserModelRuntime) {
   const control = new AbortController();
   s.controllers.set(task.id, control);
   const timer = setTimeout(() => control.abort(), AGENT_LIMITS.wall_ms);
@@ -92,7 +99,8 @@ export async function runAgent(s: any, task: any, auth: any) {
     // Never overwrite messages[0] when valid — preserves KV prefix cache!
     // Only seed/upgrade if empty or missing a system message (or legacy dynamic system prompt from pre-v2).
     if (!messages.length) {
-      const apiHint = initial.spec.kind === 'js' ? suggestPublicApiHint(task.message) : undefined;
+      const pureQ = isPureQuestion(task.message);
+      const apiHint = !pureQ && initial.spec.kind === 'js' ? suggestPublicApiHint(task.message) : undefined;
       messages = [
         {role: 'system', content: staticSystem},
         {
@@ -100,8 +108,12 @@ export async function runAgent(s: any, task: any, auth: any) {
           content: JSON.stringify({
             work_id: task.work_id,
             request: task.message,
+            ...(pureQ ? {intent_hint: 'User appears to be asking about capabilities/usage rather than requesting code edits. Answer directly without calling tools.'} : {}),
+            ...(task.voice_component && !pureQ
+              ? {voice_component_enabled: '请围绕本应用独立设计专属界面（切勿套用待办列表样式），启用 js.voice={mode:"both",long_trigger:"double_click",tts:"stella",search:true} 并用内置无头组件 var V=voice({role,state,tools}) 定义本应用专属工具（保留上下/单击确认/挥手原交互）。'}
+              : {}),
             current_work: initial,
-            ...(initial.spec.kind === 'js' && String(initial.spec.js?.source ?? '').length < 1500
+            ...(!pureQ && initial.spec.kind === 'js' && String(initial.spec.js?.source ?? '').length < 1500
               ? {reference_template: JS_TEMPLATES[pickTemplate(task.message)]}
               : {}),
             ...(apiHint ? {available_public_apis_hint: apiHint} : {}),
@@ -127,7 +139,9 @@ export async function runAgent(s: any, task: any, auth: any) {
       live();
       messages = sanitizeMessages(messages);
       const work = s.work(auth.id, task.work_id, auth.works);
-      const backends = s.router.backends();
+      const backends = userRuntime
+        ? [{context_tokens: 131072, max_output_tokens: 16384}]
+        : s.router.backends();
       const context = Math.min(AGENT_LIMITS.context_tokens, ...backends.map((b: any) => b.context_tokens));
       const output = Math.min(AGENT_LIMITS.max_output_tokens, ...backends.map((b: any) => b.max_output_tokens));
       const threshold = Math.min(Math.floor(context * 0.72), context - output - 2048);
@@ -160,7 +174,8 @@ export async function runAgent(s: any, task: any, auth: any) {
           },
           control.signal,
           Math.min(AGENT_LIMITS.request_ms, Math.max(1000, AGENT_LIMITS.wall_ms - (Date.now() - task.started_at))),
-          (delta: StreamDelta) => emitLive({live_reply: delta.content, live_tool: delta.toolName, live_bytes: delta.toolArgBytes})
+          (delta: StreamDelta) => emitLive({live_reply: delta.content, live_tool: delta.toolName, live_bytes: delta.toolArgBytes}),
+          userRuntime
         );
         data = res.data;
         route = res.route;
@@ -214,6 +229,14 @@ export async function runAgent(s: any, task: any, auth: any) {
             (/\bRELAY\b/.test(bodySrc) && /\bnet\.request\b/.test(bodySrc));
           if (!auth.works && actual.spec?.kind === 'js' && usesRelay && !actual.spec.js.relay_url && task.origin) {
             await s.relay.ensure(auth.id, actual.id, task.origin, false);
+          }
+          // Auto-enable default non-intrusive Voice+Agent hardware spec if source invokes voice({...}) or agent.config({...})
+          const strippedVoiceShim = bodySrc.replace(/function\s+voice\s*\([\s\S]*?return\s+V;\s*\}/g, '');
+          const usesVoiceComp = /\b(?:voice|agent\.config)\s*\(\s*\{/.test(strippedVoiceShim);
+          if (!auth.works && actual.spec?.kind === 'js' && usesVoiceComp && (!actual.spec.js.voice || actual.spec.js.voice.mode === 'off')) {
+            const nextSpec = structuredClone(actual.spec);
+            nextSpec.js.voice = {mode: 'both', long_trigger: 'double_click', tts: 'stella', search: true, thinking: false};
+            s.save(auth.id, nextSpec, actual.id, actual.rev);
           }
           const latest = s.work(auth.id, task.work_id, auth.works);
           // For pure Q&A (no edit made and no code block), don't fail the conversation if the user's pre-existing manual draft had an error

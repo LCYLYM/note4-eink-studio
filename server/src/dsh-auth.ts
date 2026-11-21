@@ -1,115 +1,206 @@
 import {readJSON} from './http';
 
 const enc = new TextEncoder();
-const dec = new TextDecoder();
 const DSH_PLATFORM = 'https://platform.deepseek.com';
+const DSH_CLIENT_HEADERS: Record<string, string> = {
+  'User-Agent': 'sy-note4/2.1.0',
+  'x-client-bundle-id': '',
+  'x-client-platform': 'web',
+  'x-client-version': '2.1.0',
+  'x-client-locale': 'zh_CN',
+  'x-client-timezone-offset': '28800',
+};
+
+// Volatile RAM-only one-time handoff maps (NEVER persisted to SQLite/disk; auto-expire <= 180s & self-delete on first read!)
+type BridgeClaim = {owner: string; cred: any; expiresAt: number};
+type DeviceDrop = {owner: string; payload: any; rev: number; expiresAt: number};
+const ramBridgeClaims = new Map<string, BridgeClaim>();
+const ramDeviceDrops = new Map<string, DeviceDrop>();
+
+function sweepEphemeral() {
+  const t = Date.now();
+  for (const [k, v] of ramBridgeClaims) if (v.expiresAt <= t) ramBridgeClaims.delete(k);
+  for (const [k, v] of ramDeviceDrops) if (v.expiresAt <= t) ramDeviceDrops.delete(k);
+}
+
+/** Ensures zero user AI credentials ever remain in server SQLite storage. */
+export function purgeLegacyServerAiCred(platform: any) {
+  try {
+    platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='ai_cred'");
+    platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='dsh_pkce'");
+  } catch {}
+}
 
 function b64url(bytes: Uint8Array): string {
   let s = '';
   for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i]);
   return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
 }
-function fromB64(b64: string): Uint8Array {
-  const bin = atob(b64);
-  const out = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
-  return out;
-}
 
-async function deriveSealKey(secret: string): Promise<CryptoKey> {
-  const raw = await crypto.subtle.digest('SHA-256', enc.encode('note4-ai-cred-v1:' + (secret || 'dev-local-seal')));
-  return crypto.subtle.importKey('raw', raw, {name: 'AES-GCM'}, false, ['encrypt', 'decrypt']);
-}
-
-export async function sealSecret(secretKey: string, plaintext: string): Promise<string> {
-  const key = await deriveSealKey(secretKey);
-  const iv = crypto.getRandomValues(new Uint8Array(12));
-  const ct = new Uint8Array(await crypto.subtle.encrypt({name: 'AES-GCM', iv}, key, enc.encode(plaintext)));
-  return btoa(String.fromCharCode(...iv)) + '.' + btoa(String.fromCharCode(...ct));
-}
-
-export async function unsealSecret(secretKey: string, sealed: string): Promise<string> {
-  const [ivB64, ctB64] = String(sealed || '').split('.');
-  if (!ivB64 || !ctB64) throw Error('Invalid sealed credential');
-  const key = await deriveSealKey(secretKey);
-  const pt = await crypto.subtle.decrypt({name: 'AES-GCM', iv: fromB64(ivB64)}, key, fromB64(ctB64));
-  return dec.decode(pt);
-}
-
-function maskToken(kind: string, token: string): string {
+export function maskToken(kind: string, token: string): string {
   if (!token) return '';
   if (token.length <= 10) return '***';
   return (kind === 'api_key' ? token.slice(0, 6) : 'dsh_' + token.slice(0, 4)) + '…' + token.slice(-4);
 }
 
-function normBaseUrl(u?: string): string {
-  const s = String(u || 'https://api.deepseek.com').trim().replace(/\/+$/, '');
-  return s || 'https://api.deepseek.com';
-}
-function buildV1(baseUrl: string, sub: string): string {
-  const b = normBaseUrl(baseUrl);
-  return (b.endsWith('/v1') ? b : b + '/v1') + sub;
+function isPrivateOrLocalHost(host: string): boolean {
+  const h = host.toLowerCase().replace(/^\[|\]$/g, '');
+  if (!h || h === 'localhost' || h === '::1' || h === '0.0.0.0' || h.endsWith('.local') || h.endsWith('.internal')) return true;
+  if (/^(fc|fd|fe80):/i.test(h)) return true;
+  const m = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!m) return false;
+  const [a, b] = [Number(m[1]), Number(m[2])];
+  return (
+    a === 0 || a === 10 || a === 127 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168) ||
+    (a === 100 && b >= 64 && b <= 127)
+  );
 }
 
-async function extFetch(platform: any, url: string, init: RequestInit): Promise<Response> {
-  const fn = platform.env.modelFetch ?? fetch;
-  return fn(url, {...init, signal: init.signal ?? AbortSignal.timeout(15000)});
-}
-
-async function fetchDshBalance(platform: any, dshToken: string): Promise<string | null> {
+export function sanitizeUserBaseUrl(raw?: string, allowLocalHttp = false): string | null {
+  let u: URL;
   try {
-    const res = await extFetch(platform, DSH_PLATFORM + '/api/v0/users/get_user_summary', {
-      method: 'GET',
-      headers: {'x-dsh-auth-token': dshToken, 'User-Agent': 'NOTE4-Studio/2.0.0'},
-    });
-    if (!res.ok) return null;
-    const j: any = await res.json();
-    const d = j?.data?.biz_data ?? j?.data ?? j;
-    const wallets = [...(d?.normal_wallets ?? []), ...(d?.bonus_wallets ?? [])];
-    if (!wallets.length) return null;
-    return wallets.map((w: any) => `${w.currency ?? 'CNY'} ${w.balance ?? w.total_balance ?? '0.00'}`).join(' / ');
+    u = new URL(String(raw || 'https://api.deepseek.com').trim());
   } catch {
     return null;
   }
+  if (u.username || u.password) return null;
+  u.search = '';
+  u.hash = '';
+  if (u.protocol === 'https:') {
+    if (!allowLocalHttp && isPrivateOrLocalHost(u.hostname)) return null;
+    return u.toString().replace(/\/+$/, '');
+  }
+  if (allowLocalHttp && u.protocol === 'http:' && ['127.0.0.1', 'localhost'].includes(u.hostname)) {
+    return u.toString().replace(/\/+$/, '');
+  }
+  return null;
 }
 
-function bumpUserDevicesCredRev(platform: any, uid: string, rev: number) {
-  for (const d of platform.owned('device', uid)) {
-    d.ai_cred_rev = rev;
-    platform.put('device', d);
+function buildV1(baseUrl: string, sub: string): string {
+  const b = String(baseUrl || 'https://api.deepseek.com').replace(/\/+$/, '');
+  return (b.endsWith('/v1') ? b : b + '/v1') + sub;
+}
+
+async function extFetch(platform: any, url: string, init: RequestInit, userCustomBase = false): Promise<Response> {
+  const fn = userCustomBase && platform.env.DEV_MODE !== 'true'
+    ? (platform.env.safeFetch ?? platform.env.modelFetch ?? fetch)
+    : (platform.env.modelFetch ?? fetch);
+  return fn(url, {...init, signal: init.signal ?? AbortSignal.timeout(15000)});
+}
+
+type TokenVerifyResult = {status: 'valid' | 'revoked' | 'unknown'; balance: string | null; reason?: string};
+
+async function verifyDshToken(platform: any, dshToken: string): Promise<TokenVerifyResult> {
+  try {
+    const res = await extFetch(platform, DSH_PLATFORM + '/api/v0/users/get_user_summary', {
+      method: 'GET',
+      headers: {...DSH_CLIENT_HEADERS, 'x-dsh-auth-token': dshToken},
+    });
+    if (res.status === 401 || res.status === 403) {
+      return {status: 'revoked', balance: null, reason: 'HTTP_' + res.status};
+    }
+    const j: any = await res.json().catch(() => null);
+    if (!j) return {status: 'unknown', balance: null};
+    const code = Number(j?.code ?? 0);
+    const bizCode = Number(j?.data?.biz_code ?? 0);
+    const msg = String(j?.msg || j?.data?.biz_msg || '');
+    if (
+      code === 40003 || code === 401 || code === 403 ||
+      bizCode === 40003 || bizCode === 401 || bizCode === 403 ||
+      /authorization failed|invalid token|invalid dsh|unauthoriz|expired|revoked/i.test(msg)
+    ) {
+      return {status: 'revoked', balance: null, reason: msg || 'TOKEN_REVOKED'};
+    }
+    if (!res.ok || code !== 0) return {status: 'unknown', balance: null};
+    const d = j?.data?.biz_data ?? j?.data ?? j;
+    const wallets = [...(d?.normal_wallets ?? []), ...(d?.bonus_wallets ?? [])];
+    if (!wallets.length) return {status: 'valid', balance: null};
+    const totals = new Map<string, number>();
+    for (const w of wallets) {
+      const cur = String(w?.currency ?? 'CNY');
+      const v = Number(w?.balance ?? w?.total_balance ?? 0);
+      if (Number.isFinite(v)) totals.set(cur, (totals.get(cur) ?? 0) + v);
+    }
+    return {status: 'valid', balance: [...totals.entries()].map(([cur, sum]) => `${cur} ${sum.toFixed(2)}`).join(' / ')};
+  } catch {
+    return {status: 'unknown', balance: null};
   }
 }
 
-export async function getDeviceAiCredPayload(platform: any, deviceOwner: string): Promise<any> {
-  const rec = platform.get('ai_cred', deviceOwner);
-  if (!rec) return {rev: 0, cleared: true};
-  if (rec.cleared || !rec.sealed) return {rev: rec.rev ?? 1, cleared: true};
-  const token = await unsealSecret(platform.env.APP_SEAL_KEY || '', rec.sealed);
-  return {
-    rev: rec.rev ?? 1,
-    cleared: false,
-    kind: rec.kind,
-    token,
-    base_url: rec.base_url || 'https://api.deepseek.com',
-    model: rec.model || 'deepseek-flash',
-  };
+async function verifyApiKey(platform: any, baseUrl: string, apiKey: string): Promise<TokenVerifyResult> {
+  try {
+    const res = await extFetch(platform, buildV1(baseUrl, '/models'), {
+      method: 'GET',
+      headers: {Authorization: 'Bearer ' + apiKey, 'User-Agent': 'sy-note4/2.1.0'},
+    }, true);
+    if (res.status === 401 || res.status === 403) {
+      return {status: 'revoked', balance: null, reason: 'HTTP_' + res.status};
+    }
+    return {status: res.ok ? 'valid' : 'unknown', balance: null};
+  } catch {
+    return {status: 'unknown', balance: null};
+  }
 }
 
-async function completePkceExchange(platform: any, code: string, state: string): Promise<any> {
+async function fetchDshBalance(platform: any, dshToken: string): Promise<string | null> {
+  const v = await verifyDshToken(platform, dshToken);
+  return v.balance;
+}
+
+export function readCallerBrowserCred(r: Request, allowLocalHttp = false) {
+  const token = String(r.headers.get('x-n4-ai-token') || '').trim();
+  if (!token || token.length < 6 || token.length > 512) return null;
+  const kind: 'dsh_token' | 'api_key' = r.headers.get('x-n4-ai-kind') === 'api_key' ? 'api_key' : 'dsh_token';
+  // For DSH official login, base_url is strictly locked to https://api.deepseek.com; custom api_key base_url is SSRF-validated!
+  const base_url = kind === 'dsh_token'
+    ? 'https://api.deepseek.com'
+    : sanitizeUserBaseUrl(r.headers.get('x-n4-ai-base') || 'https://api.deepseek.com', allowLocalHttp);
+  if (!base_url) return null;
+  const model = String(r.headers.get('x-n4-ai-model') || 'deepseek-flash').trim().slice(0, 96) || 'deepseek-flash';
+  return {kind, token, base_url, model};
+}
+
+export function pendingDeviceAiCredRev(deviceId: string, deviceOwner?: string): number {
+  sweepEphemeral();
+  if (!deviceOwner) return 0;
+  const drop = ramDeviceDrops.get(deviceId);
+  return drop && drop.owner === deviceOwner ? drop.rev : 0;
+}
+
+/** One-time volatile RAM delivery bound strictly to (deviceId, deviceOwner); immediately wiped on read! */
+export async function getDeviceAiCredPayload(_platform: any, deviceOwner: string, deviceId?: string): Promise<any> {
+  sweepEphemeral();
+  if (!deviceId || !deviceOwner) return {rev: 0, cleared: true};
+  const drop = ramDeviceDrops.get(deviceId);
+  if (!drop || drop.owner !== deviceOwner) return {rev: 0, cleared: true};
+  ramDeviceDrops.delete(deviceId); // Self-destruct immediately on single device read!
+  return drop.payload;
+}
+
+async function completePkceExchange(platform: any, code: string, state: string): Promise<{uid: string; cred: any}> {
+  sweepEphemeral();
   if (!code || !state) throw Object.assign(Error('缺少授权码 code 或 state'), {status: 400});
   const pkce = platform.get('dsh_pkce', state);
-  if (!pkce || pkce.expires_at < Date.now()) throw Object.assign(Error('授权会话已过期，请重新点击发起登录'), {status: 400});
+  if (!pkce || pkce.expires_at < Date.now()) {
+    try { platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='dsh_pkce' AND id=?", state); } catch {}
+    throw Object.assign(Error('授权会话已过期，请重新点击发起登录'), {status: 400});
+  }
+  // Delete single-use PKCE verifier immediately before exchange so it can never be replayed
+  platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='dsh_pkce' AND id=?", state);
 
   const res = await extFetch(platform, DSH_PLATFORM + '/auth-api/v0/dsh/auth_exchange', {
     method: 'POST',
-    headers: {'Content-Type': 'application/json', 'User-Agent': 'NOTE4-Studio/2.0.0'},
+    headers: {...DSH_CLIENT_HEADERS, 'Content-Type': 'application/json'},
     body: JSON.stringify({
       code,
       code_verifier: pkce.code_verifier,
       redirect_uri: pkce.redirect_uri,
       device_id: pkce.device_id,
-      device_model: 'NOTE4-EInk-Studio',
-      os_version: 'NOTE4-v2.0',
+      device_model: 'sy-note4',
+      os_version: 'NOTE4-OS 2.1',
     }),
   });
   const data: any = await res.json().catch(() => ({}));
@@ -118,30 +209,23 @@ async function completePkceExchange(platform: any, code: string, state: string):
     const msg = data?.data?.biz_msg || data?.msg || ('HTTP ' + res.status);
     throw Object.assign(Error('DeepSeek 授权交换失败：' + String(msg).slice(0, 160)), {status: 400});
   }
-  const uid = pkce.owner;
-  const prior = platform.get('ai_cred', uid);
-  const rev = (prior?.rev ?? 0) + 1;
-  const sealed = await sealSecret(platform.env.APP_SEAL_KEY || '', String(biz.token));
-  const rec = {
-    id: uid,
-    owner: uid,
+  const tok = String(biz.token);
+  const balance = await fetchDshBalance(platform, tok);
+  const rev = Math.floor(Date.now() / 1000);
+  const cred = {
+    configured: true,
+    storage: 'browser_only',
     kind: 'dsh_token',
-    sealed,
-    masked: maskToken('dsh_token', String(biz.token)),
+    token: tok,
+    masked: maskToken('dsh_token', tok),
     base_url: 'https://api.deepseek.com',
     model: 'deepseek-flash',
     user: biz.user ? {name: biz.user.name || biz.user.email || biz.user.mobile_number || 'DeepSeek 用户', id: biz.user.id} : {name: 'DeepSeek 账号'},
-    cleared: false,
+    balance,
     rev,
     updated_at: Date.now(),
   };
-  platform.ctx.storage.transactionSync(() => {
-    platform.put('ai_cred', rec, uid);
-    platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='dsh_pkce' AND id=?", state);
-  });
-  bumpUserDevicesCredRev(platform, uid, rev);
-  const balance = await fetchDshBalance(platform, String(biz.token));
-  return {ok: true, configured: true, kind: rec.kind, masked: rec.masked, user: rec.user, balance, rev};
+  return {uid: pkce.owner, cred};
 }
 
 export async function handlePublicOAuthRoute(platform: any, r: Request): Promise<Response | null> {
@@ -150,26 +234,31 @@ export async function handlePublicOAuthRoute(platform: any, r: Request): Promise
     const code = u.searchParams.get('code') || '';
     const state = u.searchParams.get('state') || '';
     try {
-      await completePkceExchange(platform, code, state);
+      const {uid, cred} = await completePkceExchange(platform, code, state);
+      // Store short-lived 90s claim in volatile RAM ONLY in case window.opener is null; also postMessage to same-origin opener!
+      ramBridgeClaims.set(uid + ':' + state, {owner: uid, cred, expiresAt: Date.now() + 90000});
+      const safeJson = JSON.stringify(cred).replace(/</g, '\\u003c');
       return new Response(
-        '<!doctype html><meta charset=utf-8><title>授权成功</title><body style="font:16px system-ui;padding:40px;text-align:center"><h2>DeepSeek 账号授权成功</h2><p>已同步至 NOTE4 创作台，此窗口将自动关闭。</p><script>try{window.opener?.postMessage({type:"note4_dsh_ok"},"*");setTimeout(()=>window.close(),800);}catch{}</script>',
+        `<!doctype html><meta charset=utf-8><title>授权成功</title><body style="font:16px system-ui;padding:40px;text-align:center"><h2>DeepSeek 账号授权成功</h2><p>凭证已保存在你本机浏览器（不写入服务器），此窗口将自动关闭。</p><script>try{var c=${safeJson};localStorage.setItem("n4_voice_cred_v2",JSON.stringify(c));window.opener?.postMessage({type:"note4_dsh_cred",cred:c},window.location.origin);setTimeout(()=>window.close(),600);}catch{}</script>`,
         {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}}
       );
     } catch (e: any) {
       return new Response(
         `<!doctype html><meta charset=utf-8><title>授权失败</title><body style="font:16px system-ui;padding:40px;text-align:center"><h2>授权未完成</h2><p>${String(e.message || '请返回重试').replace(/[<>&]/g, '')}</p>`,
-        {status: 400, headers: {'Content-Type': 'text/html; charset=utf-8'}}
+        {status: 400, headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}}
       );
     }
   }
   if (u.pathname === '/api/ai-cred/dsh/bridge-complete' && r.method === 'POST') {
     const b: any = await readJSON(r, 16384);
-    const pkce = platform.get('dsh_pkce', String(b.state || ''));
+    const state = String(b.state || '');
+    const pkce = platform.get('dsh_pkce', state);
     if (!pkce || !b.bridge_token || pkce.bridge_token !== b.bridge_token) {
       return Response.json({error: 'Invalid bridge token'}, {status: 403, headers: {'Access-Control-Allow-Origin': '*'}});
     }
-    const out = await completePkceExchange(platform, String(b.code || ''), String(b.state || ''));
-    return Response.json(out, {headers: {'Access-Control-Allow-Origin': '*'}});
+    const {uid, cred} = await completePkceExchange(platform, String(b.code || ''), state);
+    ramBridgeClaims.set(uid + ':' + state, {owner: uid, cred, expiresAt: Date.now() + 90000});
+    return Response.json({ok: true, configured: true, masked: cred.masked}, {headers: {'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store'}});
   }
   if (u.pathname === '/api/ai-cred/dsh/bridge-complete' && r.method === 'OPTIONS') {
     return new Response(null, {status: 204, headers: {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type'}});
@@ -182,28 +271,70 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
   if (!u.pathname.startsWith('/api/ai-cred')) return null;
   const sub = u.pathname.slice('/api/ai-cred'.length);
   const method = r.method;
+  const devLocal = platform.env.DEV_MODE === 'true';
+  sweepEphemeral();
+
+  if (sub === '/models' && method === 'GET') {
+    const caller = readCallerBrowserCred(r, devLocal);
+    if (!caller) return Response.json({models: ['deepseek-flash'], default_model: 'deepseek-flash', locked_official: true});
+    const authHeader: Record<string, string> = caller.kind === 'dsh_token' ? {'x-dsh-auth-token': caller.token} : {Authorization: 'Bearer ' + caller.token};
+    let models: string[] = [];
+    try {
+      const mr = await extFetch(platform, buildV1(caller.base_url, '/models'), {
+        method: 'GET',
+        headers: {...authHeader, 'User-Agent': 'sy-note4/2.1.0'},
+      }, caller.kind === 'api_key');
+      if (mr.status === 401 || mr.status === 403) {
+        return Response.json(
+          {error: 'DeepSeek 登录态已在官网退出或失效，请重新登录', code: 'AI_CRED_REVOKED', revoked: true},
+          {status: 401, headers: {'Cache-Control': 'no-store'}}
+        );
+      }
+      if (mr.ok) {
+        const j: any = await mr.json();
+        models = (j?.data ?? []).map((x: any) => String(x?.id || '').trim()).filter(Boolean);
+      }
+    } catch {}
+    if (!models.includes('deepseek-flash')) models.unshift('deepseek-flash');
+    else models = ['deepseek-flash', ...models.filter(m => m !== 'deepseek-flash')];
+    return Response.json({
+      models: models.slice(0, 20),
+      default_model: 'deepseek-flash',
+      selected_model: caller.model || 'deepseek-flash',
+      locked_official: caller.kind === 'dsh_token',
+    }, {headers: {'Cache-Control': 'no-store'}});
+  }
 
   if ((sub === '' || sub === '/status') && method === 'GET') {
-    const rec = platform.get('ai_cred', uid);
-    if (!rec || rec.cleared || !rec.sealed) return Response.json({configured: false, rev: rec?.rev ?? 0});
+    const caller = readCallerBrowserCred(r, devLocal);
+    if (!caller) return Response.json({configured: false, revoked: false, storage: 'browser_only', rev: 0});
     let balance: string | null = null;
-    if (rec.kind === 'dsh_token' && u.searchParams.get('refresh') === '1') {
-      try {
-        const tok = await unsealSecret(platform.env.APP_SEAL_KEY || '', rec.sealed);
-        balance = await fetchDshBalance(platform, tok);
-      } catch {}
+    if (u.searchParams.get('refresh') === '1') {
+      const v = caller.kind === 'dsh_token'
+        ? await verifyDshToken(platform, caller.token)
+        : await verifyApiKey(platform, caller.base_url, caller.token);
+      if (v.status === 'revoked') {
+        return Response.json({
+          configured: false,
+          revoked: true,
+          code: 'AI_CRED_REVOKED',
+          reason: v.reason || '官网登录态已退出或失效',
+          storage: 'browser_only',
+          rev: 0,
+        }, {headers: {'Cache-Control': 'no-store'}});
+      }
+      balance = v.balance;
     }
     return Response.json({
       configured: true,
-      kind: rec.kind,
-      masked: rec.masked,
-      base_url: rec.base_url,
-      model: rec.model,
-      user: rec.user ?? null,
+      revoked: false,
+      storage: 'browser_only',
+      kind: caller.kind,
+      masked: maskToken(caller.kind, caller.token),
+      base_url: caller.base_url,
+      model: caller.model,
       balance,
-      rev: rec.rev ?? 1,
-      updated_at: rec.updated_at,
-    });
+    }, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/dsh/init' && method === 'POST') {
@@ -211,14 +342,14 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(verifier))));
     const state = b64url(crypto.getRandomValues(new Uint8Array(18)));
     const bridgeToken = b64url(crypto.getRandomValues(new Uint8Array(24)));
-    const deviceId = 'note4_' + b64url(crypto.getRandomValues(new Uint8Array(12)));
+    const deviceId = crypto.randomUUID();
     const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
     const cbPort = isLocal ? (u.port || '8787') : '54321';
     const redirectUri = `http://127.0.0.1:${cbPort}/oauth/callback`;
 
     const res = await extFetch(platform, DSH_PLATFORM + '/auth-api/v0/dsh/auth_init', {
       method: 'POST',
-      headers: {'Content-Type': 'application/json', 'User-Agent': 'NOTE4-Studio/2.0.0'},
+      headers: {...DSH_CLIENT_HEADERS, 'Content-Type': 'application/json'},
       body: JSON.stringify({
         code_challenge: challenge,
         code_challenge_method: 'S256',
@@ -240,13 +371,13 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
       redirect_uri: redirectUri,
       device_id: deviceId,
       bridge_token: bridgeToken,
-      expires_at: Date.now() + 600000,
+      expires_at: Date.now() + 300000,
     }, state);
 
     const completeEndpoint = `${u.origin}/api/ai-cred/dsh/bridge-complete`;
     const bridgeCmd = isLocal
       ? ''
-      : `node -e 'const h=require("http"),s=h.createServer(async(q,r)=>{const u=new URL(q.url,"http://127.0.0.1:54321");if(u.pathname!=="/oauth/callback"){r.end();return;}const x=await fetch(${JSON.stringify(completeEndpoint)},{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:u.searchParams.get("code"),state:u.searchParams.get("state"),bridge_token:${JSON.stringify(bridgeToken)}})});r.setHeader("content-type","text/html;charset=utf-8");r.end(x.ok?"<h2>NOTE4 授权已完成，可关闭此页</h2>":"<h2>授权失败</h2>");s.close();}).listen(54321,"127.0.0.1",()=>console.log("请在浏览器完成登录:",${JSON.stringify(biz.authorize_url)}))'`;
+      : `node -e 'const h=require("http"),s=h.createServer(async(q,r)=>{const u=new URL(q.url,"http://127.0.0.1:54321");if(u.pathname!=="/oauth/callback"){r.end();return;}const x=await fetch(${JSON.stringify(completeEndpoint)},{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:u.searchParams.get("code"),state:u.searchParams.get("state"),bridge_token:${JSON.stringify(bridgeToken)}})});r.setHeader("content-type","text/html;charset=utf-8");r.end(x.ok?"<h2>NOTE4 授权已完成，可回网页继续</h2>":"<h2>授权失败</h2>");s.close();}).listen(54321,"127.0.0.1",()=>console.log("请在浏览器完成登录:",${JSON.stringify(biz.authorize_url)}))'`;
 
     return Response.json({
       state,
@@ -254,8 +385,19 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
       redirect_uri: redirectUri,
       is_local: isLocal,
       bridge_cmd: bridgeCmd,
-      expires_in: biz.expires_in ?? 600,
-    });
+      expires_in: biz.expires_in ?? 300,
+    }, {headers: {'Cache-Control': 'no-store'}});
+  }
+
+  if (sub === '/dsh/claim' && method === 'POST') {
+    const b: any = await readJSON(r, 4096);
+    const key = uid + ':' + String(b.state || '');
+    const hit = ramBridgeClaims.get(key);
+    if (!hit || hit.owner !== uid || hit.expiresAt <= Date.now()) {
+      return Response.json({ready: false}, {headers: {'Cache-Control': 'no-store'}});
+    }
+    ramBridgeClaims.delete(key); // Single-use claim, wiped from RAM immediately!
+    return Response.json({ready: true, cred: hit.cred}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/dsh/complete' && method === 'POST') {
@@ -270,131 +412,201 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     }
     const pkce = platform.get('dsh_pkce', state);
     if (!pkce || pkce.owner !== uid) throw Object.assign(Error('未找到匹配的授权请求，请重新发起授权'), {status: 400});
-    return Response.json(await completePkceExchange(platform, code, state));
+    const {cred} = await completePkceExchange(platform, code, state);
+    return Response.json({ok: true, configured: true, cred}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/apikey' && method === 'POST') {
     const b: any = await readJSON(r, 16384);
     const key = String(b.api_key || '').trim();
-    const baseUrl = normBaseUrl(b.base_url);
+    const baseUrl = sanitizeUserBaseUrl(b.base_url, devLocal);
     const model = String(b.model || 'deepseek-flash').trim() || 'deepseek-flash';
-    if (key.length < 8 || key.length > 512 || !baseUrl.startsWith('https://')) {
-      throw Object.assign(Error('请填写有效的 API Key 与 https:// 接口地址'), {status: 400});
+    if (key.length < 8 || key.length > 512 || !baseUrl) {
+      throw Object.assign(Error('请填写有效的 API Key 与公网 https:// 接口地址'), {status: 400});
     }
     const mRes = await extFetch(platform, buildV1(baseUrl, '/models'), {
       method: 'GET',
-      headers: {Authorization: 'Bearer ' + key, 'User-Agent': 'NOTE4-Studio/2.0.0'},
-    });
+      headers: {Authorization: 'Bearer ' + key, 'User-Agent': 'NOTE4-Studio/2.1.0'},
+    }, true);
     if (!mRes.ok) {
       const cRes = await extFetch(platform, buildV1(baseUrl, '/chat/completions'), {
         method: 'POST',
-        headers: {Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'User-Agent': 'NOTE4-Studio/2.0.0'},
+        headers: {Authorization: 'Bearer ' + key, 'Content-Type': 'application/json', 'User-Agent': 'NOTE4-Studio/2.1.0'},
         body: JSON.stringify({model, messages: [{role: 'user', content: 'OK'}], max_tokens: 4}),
-      });
+      }, true);
       if (!cRes.ok) throw Object.assign(Error(`API Key 连通校验失败（HTTP ${cRes.status}），请检查密钥与地址`), {status: 400});
     }
-    const prior = platform.get('ai_cred', uid);
-    const rev = (prior?.rev ?? 0) + 1;
-    const sealed = await sealSecret(platform.env.APP_SEAL_KEY || '', key);
-    const rec = {
-      id: uid,
-      owner: uid,
+    const rev = Math.floor(Date.now() / 1000);
+    const cred = {
+      configured: true,
+      storage: 'browser_only',
       kind: 'api_key',
-      sealed,
+      token: key,
       masked: maskToken('api_key', key),
       base_url: baseUrl,
       model,
       user: null,
-      cleared: false,
+      balance: null,
       rev,
       updated_at: Date.now(),
     };
-    platform.put('ai_cred', rec, uid);
-    bumpUserDevicesCredRev(platform, uid, rev);
-    return Response.json({ok: true, configured: true, kind: rec.kind, masked: rec.masked, base_url: baseUrl, model, rev});
+    return Response.json({ok: true, configured: true, cred}, {headers: {'Cache-Control': 'no-store'}});
   }
 
-  if (sub === '' && method === 'DELETE') {
-    const prior = platform.get('ai_cred', uid);
-    if (prior?.kind === 'dsh_token' && prior?.sealed && !prior?.cleared) {
+  if ((sub === '' || sub === '/logout') && (method === 'DELETE' || method === 'POST')) {
+    const caller = readCallerBrowserCred(r, devLocal);
+    if (caller?.kind === 'dsh_token' && caller.token) {
       try {
-        const tok = await unsealSecret(platform.env.APP_SEAL_KEY || '', prior.sealed);
         await extFetch(platform, DSH_PLATFORM + '/auth-api/v0/users/logout', {
           method: 'POST',
-          headers: {'x-dsh-auth-token': tok, 'Content-Type': 'application/json'},
-          body: '{}',
+          headers: {...DSH_CLIENT_HEADERS, 'x-dsh-auth-token': caller.token},
         });
       } catch {}
     }
-    const rev = (prior?.rev ?? 0) + 1;
-    platform.put('ai_cred', {id: uid, owner: uid, cleared: true, rev, updated_at: Date.now()}, uid);
-    bumpUserDevicesCredRev(platform, uid, rev);
-    return Response.json({ok: true, configured: false, rev});
-  }
-
-  if (sub === '/usb-payload' && method === 'POST') {
-    const p = await getDeviceAiCredPayload(platform, uid);
-    return Response.json(p.cleared ? {clear: true, rev: p.rev} : p);
+    const rev = Math.floor(Date.now() / 1000);
+    for (const d of platform.owned('device', uid)) {
+      ramDeviceDrops.set(d.id, {owner: uid, rev, payload: {rev, cleared: true}, expiresAt: Date.now() + 180000});
+    }
+    return Response.json({ok: true, configured: false, rev}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/sync-devices' && method === 'POST') {
-    const rec = platform.get('ai_cred', uid);
-    const rev = (rec?.rev ?? 0) + 1;
-    if (rec) { rec.rev = rev; platform.put('ai_cred', rec, uid); }
-    bumpUserDevicesCredRev(platform, uid, rev);
-    return Response.json({ok: true, rev, devices: platform.owned('device', uid).length});
+    const caller = readCallerBrowserCred(r, devLocal);
+    if (!caller) throw Object.assign(Error('请先在当前浏览器登录 DeepSeek 账号或填写 API Key'), {status: 400});
+    const rev = Math.floor(Date.now() / 1000);
+    const ownedDevs = platform.owned('device', uid);
+    for (const d of ownedDevs) {
+      ramDeviceDrops.set(d.id, {
+        owner: uid,
+        rev,
+        payload: {rev, cleared: false, kind: caller.kind, token: caller.token, base_url: caller.base_url, model: caller.model},
+        expiresAt: Date.now() + 180000,
+      });
+    }
+    return Response.json({ok: true, rev, devices: ownedDevs.length, ttl_seconds: 180}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/sim-step' && method === 'POST') {
-    const b: any = await readJSON(r, 65536);
-    const p = await getDeviceAiCredPayload(platform, uid);
-    let authHeader: Record<string, string>;
-    let baseUrl = 'https://api.deepseek.com';
-    let model = 'deepseek-flash';
-    if (!p.cleared && p.token) {
-      baseUrl = p.base_url;
-      model = p.model;
-      authHeader = p.kind === 'dsh_token' ? {'x-dsh-auth-token': p.token} : {Authorization: 'Bearer ' + p.token};
-    } else if (platform.router?.configured()) {
-      baseUrl = platform.router.baseUrl();
-      model = platform.router.primaryModel?.() || 'deepseek-flash';
-      authHeader = {Authorization: 'Bearer ' + platform.router.apiKey()};
-    } else {
-      throw Object.assign(Error('请先点击右上角「语音与DeepSeek设置」绑定账号或 API Key'), {status: 400});
+    const caller = readCallerBrowserCred(r, devLocal);
+    // Strict multi-user boundary: NEVER fall back to server/admin model_runtime API keys!
+    if (!caller) {
+      return Response.json({error: '请先在右上角「语音登录」绑定你自己的 DeepSeek 账号（凭证仅存浏览器本地）', code: 'AI_CRED_UNBOUND'}, {status: 401});
     }
+    const b: any = await readJSON(r, 65536);
+    const authHeader: Record<string, string> = caller.kind === 'dsh_token' ? {'x-dsh-auth-token': caller.token} : {Authorization: 'Bearer ' + caller.token};
     if (b.builtin_tool === 'web_search') {
-      if (!p.cleared && p.kind === 'dsh_token') {
-        const sr = await extFetch(platform, buildV1(baseUrl, '/tools/search'), {
+      if (caller.kind === 'dsh_token') {
+        const sr = await extFetch(platform, buildV1(caller.base_url, '/tools/search'), {
           method: 'POST',
           headers: {...authHeader, 'Content-Type': 'application/json'},
           body: JSON.stringify({query: String(b.query || '').slice(0, 120), count: 4, need_content: false}),
         });
+        if (sr.status === 401 || sr.status === 403) {
+          return Response.json({error: 'DeepSeek 登录态已在官网退出或失效，请重新登录', code: 'AI_CRED_REVOKED', revoked: true}, {status: 401});
+        }
         if (sr.ok) return Response.json(await sr.json());
       }
-      return Response.json({results: [{title: `实时检索: ${String(b.query || '')}`, summary: '网页预览沙箱检索结果就绪，写入真机绑定 DeepSeek 账号后将调用官方实时搜索。'}]});
+      return Response.json({results: [{title: `检索: ${String(b.query || '')}`, summary: '网页预览检索完成；写入墨水屏后由设备直连 DeepSeek 官方搜索。'}]});
     }
     const chatBody: any = {
-      model,
+      model: caller.model,
       messages: Array.isArray(b.messages) ? b.messages.slice(0, 16) : [],
-      max_tokens: 640,
-      temperature: 0.2,
+      max_tokens: 240,
+      temperature: 0.35,
     };
     if (Array.isArray(b.tools) && b.tools.length > 0) chatBody.tools = b.tools;
-    let cr = await extFetch(platform, buildV1(baseUrl, '/chat/completions'), {
+    const isCustom = caller.kind === 'api_key';
+    let cr = await extFetch(platform, buildV1(caller.base_url, '/chat/completions'), {
       method: 'POST',
       headers: {...authHeader, 'Content-Type': 'application/json'},
       body: JSON.stringify({...chatBody, thinking: {type: b.thinking ? 'enabled' : 'disabled'}}),
-    });
+    }, isCustom);
     if (cr.status === 400) {
-      cr = await extFetch(platform, buildV1(baseUrl, '/chat/completions'), {
+      cr = await extFetch(platform, buildV1(caller.base_url, '/chat/completions'), {
         method: 'POST',
         headers: {...authHeader, 'Content-Type': 'application/json'},
         body: JSON.stringify(chatBody),
-      });
+      }, isCustom);
     }
     const cj: any = await cr.json().catch(() => ({}));
+    if (cr.status === 401 || cr.status === 403) {
+      return Response.json({error: 'DeepSeek 登录态已在官网退出或失效，请重新登录', code: 'AI_CRED_REVOKED', revoked: true}, {status: 401});
+    }
     if (!cr.ok) throw Object.assign(Error('模型调用失败：' + String(cj?.error?.message || cr.status).slice(0, 160)), {status: 502});
-    return Response.json({message: cj?.choices?.[0]?.message ?? {role: 'assistant', content: ''}});
+    return Response.json({message: cj?.choices?.[0]?.message ?? {role: 'assistant', content: ''}}, {headers: {'Cache-Control': 'no-store'}});
+  }
+
+  if (sub === '/asr' && method === 'POST') {
+    const caller = readCallerBrowserCred(r);
+    if (!caller) {
+      return Response.json({error: '请先绑定个人 DeepSeek 账号后再使用实时语音识别', code: 'AI_CRED_UNBOUND'}, {status: 401});
+    }
+    if (caller.kind !== 'dsh_token') {
+      return Response.json({error: '端侧同款语音识别需要 DeepSeek 官方账号登录态', code: 'ASR_REQUIRES_DSH'}, {status: 400});
+    }
+    const raw = new Uint8Array(await r.arrayBuffer());
+    if (raw.byteLength < 1024 || raw.byteLength > 4 * 1024 * 1024) {
+      return Response.json({text: '', empty: true}, {headers: {'Cache-Control': 'no-store'}});
+    }
+    const boundary = '----N4SimAsrBoundary7e9a';
+    const head = enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="chunk.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
+    const tail = enc.encode(`\r\n--${boundary}--\r\n`);
+    const mp = new Uint8Array(head.length + raw.length + tail.length);
+    mp.set(head, 0);
+    mp.set(raw, head.length);
+    mp.set(tail, head.length + raw.length);
+    const ar = await extFetch(platform, buildV1(caller.base_url, '/tools/asr'), {
+      method: 'POST',
+      headers: {'x-dsh-auth-token': caller.token, 'User-Agent': 'sy-note4/2.1.0', 'Content-Type': `multipart/form-data; boundary=${boundary}`},
+      body: mp,
+    });
+    if (ar.status === 401 || ar.status === 403) {
+      return Response.json({error: 'DeepSeek 登录态已在官网退出或失效，请重新登录', code: 'AI_CRED_REVOKED', revoked: true}, {status: 401});
+    }
+    const aj: any = await ar.json().catch(() => ({}));
+    if (!ar.ok) {
+      return Response.json({text: '', empty: true, status: ar.status, detail: String(aj?.error?.message || aj?.msg || '').slice(0, 120)}, {headers: {'Cache-Control': 'no-store'}});
+    }
+    return Response.json({text: String(aj?.text || '').trim()}, {headers: {'Cache-Control': 'no-store'}});
+  }
+
+  if (sub === '/tts' && method === 'POST') {
+    const caller = readCallerBrowserCred(r);
+    if (!caller || caller.kind !== 'dsh_token') {
+      return Response.json({error: 'TTS requires DSH account', code: 'TTS_REQUIRES_DSH'}, {status: 401});
+    }
+    const b: any = await readJSON(r, 8192);
+    const text = String(b?.text || '').trim().slice(0, 260);
+    const voiceId = b?.voice_id === 'tide' ? 'tide' : 'stella';
+    if (!text) return new Response(null, {status: 204});
+    const tr = await extFetch(platform, buildV1(caller.base_url, '/tools/tts'), {
+      method: 'POST',
+      headers: {'x-dsh-auth-token': caller.token, 'User-Agent': 'sy-note4/2.1.0', 'Content-Type': 'application/json'},
+      body: JSON.stringify({text, voice_id: voiceId, format: 'pcm', filter_markdown: true}),
+    });
+    if (tr.status === 401 || tr.status === 403) {
+      return Response.json({error: 'DeepSeek 登录态已在官网退出或失效，请重新登录', code: 'AI_CRED_REVOKED', revoked: true}, {status: 401});
+    }
+    if (!tr.ok) return new Response(null, {status: 502});
+    const pcm = new Uint8Array(await tr.arrayBuffer());
+    if (pcm.byteLength < 64) return new Response(null, {status: 204});
+    // Wrap 24kHz mono 16-bit PCM (identical to NOTE4 firmware) in a 44-byte WAV header for instant browser playback
+    const wav = new Uint8Array(44 + pcm.byteLength);
+    const dv = new DataView(wav.buffer);
+    wav.set([82, 73, 70, 70], 0); // RIFF
+    dv.setUint32(4, 36 + pcm.byteLength, true);
+    wav.set([87, 65, 86, 69, 102, 109, 116, 32], 8); // WAVEfmt
+    dv.setUint32(16, 16, true);
+    dv.setUint16(20, 1, true); // PCM
+    dv.setUint16(22, 1, true); // mono
+    dv.setUint32(24, 24000, true); // 24kHz
+    dv.setUint32(28, 48000, true); // byte rate
+    dv.setUint16(32, 2, true); // block align
+    dv.setUint16(34, 16, true); // 16-bit
+    wav.set([100, 97, 116, 97], 36); // data
+    dv.setUint32(40, pcm.byteLength, true);
+    wav.set(pcm, 44);
+    return new Response(wav, {headers: {'Content-Type': 'audio/wav', 'Cache-Control': 'no-store'}});
   }
 
   return null;

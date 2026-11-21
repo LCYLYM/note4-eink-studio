@@ -52,11 +52,12 @@ void audio_mic_start(AudioMicSink sink);
 void audio_mic_stop();
 bool audio_mic_capturing();
 
-bool audio_tts_begin();
+bool audio_tts_begin(size_t initial_prebuf_samples = 14400);
 size_t audio_tts_push(const int16_t* pcm24k, size_t samples, uint32_t timeout_ms);
 void audio_tts_finish();
 void audio_tts_abort();
 bool audio_tts_playing();
+uint32_t audio_tts_underruns();
 
 // Explicit commissioning only: preserves full user area before first write.
 bool nfc_write_url(const char* url);

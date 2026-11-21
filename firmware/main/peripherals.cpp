@@ -30,7 +30,7 @@ namespace note4 { namespace {
 
 constexpr char TAG[] = "note4_inputs";
 constexpr float kTau = 6.283185307179586f;
-constexpr size_t kTtsCap = 131072; // 256 KiB PSRAM = 5.46s @ 24kHz 16-bit mono
+constexpr size_t kTtsCap = 262144; // 512 KiB PSRAM = 10.92s @ 24kHz 16-bit mono
 
 std::atomic<uint32_t> inputs{0};
 std::atomic<int> feedback{0};
@@ -46,8 +46,9 @@ std::atomic<AudioMicSink> mic_sink{nullptr};
 std::atomic<bool> mic_active{false};
 
 int16_t* tts_ring = nullptr;
-std::atomic<size_t> tts_w{0}, tts_r{0};
+std::atomic<size_t> tts_w{0}, tts_r{0}, tts_init_prebuf{14400};
 std::atomic<bool> tts_active{false}, tts_eof{false}, tts_aborted{false};
+std::atomic<uint32_t> tts_underrun_cnt{0};
 
 portMUX_TYPE pa_guard = portMUX_INITIALIZER_UNLOCKED;
 i2c_master_bus_handle_t bus = nullptr;
@@ -64,7 +65,7 @@ void fault(const char* why) {
 
 void buttons(void*) {
     startup_ready(BUTTON_MANAGER);
-    struct Button { gpio_num_t pin; uint32_t bit; bool raw=false, stable=false, long_sent=false, ptt_sent=false, cancel_eaten=false; int64_t changed=0, pressed=0; };
+    struct Button { gpio_num_t pin; uint32_t bit; bool raw=false, stable=false, long_sent=false, ptt_sent=false, cancel_eaten=false, barge_cancelled=false; int64_t changed=0, pressed=0; };
     Button keys[] = {{GPIO_NUM_0, 1}, {GPIO_NUM_39, 2}, {GPIO_NUM_18, 4}};
     int64_t ok_pending_click_at = 0;
 
@@ -72,8 +73,8 @@ void buttons(void*) {
         const int64_t now = esp_timer_get_time() / 1000;
         const auto vmode = static_cast<VoiceKeyMode>(v_key_mode.load(std::memory_order_relaxed));
 
-        // Emit deferred single-click OK if double-click window (380ms) expired
-        if (ok_pending_click_at > 0 && now - ok_pending_click_at >= 380) {
+        // Emit deferred single-click OK if double-click window (300ms) expired while OK is not pressed
+        if (ok_pending_click_at > 0 && !keys[0].stable && !keys[0].raw && now - ok_pending_click_at >= 300) {
             ok_pending_click_at = 0;
             inputs.fetch_or(1);
         }
@@ -81,30 +82,45 @@ void buttons(void*) {
         for (auto& b : keys) {
             const bool down = !gpio_get_level(b.pin);
             if (down != b.raw) { b.raw = down; b.changed = now; }
-            if (now - b.changed >= 30 && b.stable != b.raw) {
+            if (now - b.changed >= 22 && b.stable != b.raw) {
                 b.stable = b.raw;
                 if (b.stable) {
-                    b.pressed = now; b.long_sent = false; b.ptt_sent = false; b.cancel_eaten = false;
-                    // One-key instant cancel when voice/agent/TTS is busy
-                    if (b.pin == GPIO_NUM_0 && vmode != VOICE_KEY_OFF && v_busy.load(std::memory_order_relaxed)) {
-                        b.cancel_eaten = true;
-                        ok_pending_click_at = 0;
-                        inputs.fetch_or(INPUT_VOICE_CANCEL);
+                    b.pressed = now; b.long_sent = false; b.ptt_sent = false; b.cancel_eaten = false; b.barge_cancelled = false;
+                    if (b.pin == GPIO_NUM_0 && vmode != VOICE_KEY_OFF) {
+                        // 1. Barge-in / Cancel: immediately mute speaker & abort active turn on keydown,
+                        //    while STILL allowing >=260ms hold to transition seamlessly into new PTT recording!
+                        if (v_busy.load(std::memory_order_relaxed)) {
+                            b.barge_cancelled = true;
+                            ok_pending_click_at = 0;
+                            audio_tts_abort();
+                            inputs.fetch_or(INPUT_VOICE_CANCEL);
+                        }
+                        // 2. Instant single-press stop while in latched long-recording
+                        else if (v_long_rec.load(std::memory_order_relaxed)) {
+                            b.cancel_eaten = true;
+                            ok_pending_click_at = 0;
+                            inputs.fetch_or(INPUT_VOICE_LONG_TOGGLE);
+                        }
+                        // 3. Snappy double-click detection on 2nd KEYDOWN (<= 360ms after 1st release!)
+                        else if ((vmode == VOICE_KEY_LONG || vmode == VOICE_KEY_BOTH) &&
+                                 v_dbl_long.load(std::memory_order_relaxed) &&
+                                 ok_pending_click_at > 0 && now - ok_pending_click_at <= 360) {
+                            b.cancel_eaten = true;
+                            ok_pending_click_at = 0;
+                            inputs.fetch_or(INPUT_VOICE_LONG_TOGGLE);
+                        }
                     }
                 } else {
                     if (b.pin == GPIO_NUM_0 && vmode != VOICE_KEY_OFF) {
                         if (b.cancel_eaten) continue;
                         if (b.ptt_sent) {
                             inputs.fetch_or(INPUT_VOICE_PTT_STOP);
+                        } else if (b.barge_cancelled) {
+                            // Released before 260ms hold -> pure stop/mute, do NOT trigger normal OK click
+                            continue;
                         } else if (!b.long_sent) {
-                            if (v_long_rec.load(std::memory_order_relaxed)) {
-                                ok_pending_click_at = 0;
-                                inputs.fetch_or(INPUT_VOICE_LONG_TOGGLE);
-                            } else if (vmode == VOICE_KEY_LONG || vmode == VOICE_KEY_BOTH) {
+                            if (vmode == VOICE_KEY_LONG || vmode == VOICE_KEY_BOTH) {
                                 if (!v_dbl_long.load(std::memory_order_relaxed)) {
-                                    inputs.fetch_or(INPUT_VOICE_LONG_TOGGLE);
-                                } else if (ok_pending_click_at > 0 && now - ok_pending_click_at < 380) {
-                                    ok_pending_click_at = 0;
                                     inputs.fetch_or(INPUT_VOICE_LONG_TOGGLE);
                                 } else {
                                     ok_pending_click_at = now;
@@ -120,7 +136,8 @@ void buttons(void*) {
             }
             if (b.stable && !b.cancel_eaten) {
                 if (b.pin == GPIO_NUM_0 && vmode != VOICE_KEY_OFF) {
-                    if ((vmode == VOICE_KEY_PTT || vmode == VOICE_KEY_BOTH) && !b.ptt_sent && !v_long_rec.load(std::memory_order_relaxed) && now - b.pressed >= 450) {
+                    // 260ms hold triggers PTT (including seamless barge-in right after interrupting TTS/thinking!)
+                    if ((vmode == VOICE_KEY_PTT || vmode == VOICE_KEY_BOTH) && !b.ptt_sent && !v_long_rec.load(std::memory_order_relaxed) && now - b.pressed >= 260) {
                         b.ptt_sent = true;
                         ok_pending_click_at = 0;
                         inputs.fetch_or(INPUT_VOICE_PTT_START);
@@ -135,7 +152,7 @@ void buttons(void*) {
                 }
             }
         }
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(8));
     }
 }
 struct CueSpec { uint16_t f1, f2, f3; uint16_t total_frames; bool chord; bool drain_after; };
@@ -182,13 +199,13 @@ size_t tts_avail() {
 
 void audio_worker(void*) {
     ugl::AudioCapture audio; ugl::Detector detector;
-    bool active = false, voice_vol = false, pa_on = false, tts_prebuf_done = false;
+    bool active = false, voice_vol = false, pa_on = false, tts_prebuf_done = false, tts_rebuf = false;
     float us_phase = 0, cue_p1 = 0, cue_p2 = 0;
     constexpr float us_step = kTau * 21500.f / 48000.f;
     int16_t tx[240], rx[240], dec16k[80], us_buf[2048];
     int16_t tts_prev = 0;
     size_t us_filled = 0; uint32_t overruns = 0;
-    CueSpec cur_cue{}; uint16_t cue_frame = 0, rx_drain = 0;
+    CueSpec cur_cue{}; uint16_t cue_frame = 0, rx_drain = 0, us_holdoff = 0;
 
     auto set_pa = [&](bool on) {
         if (pa_on == on) return;
@@ -230,18 +247,19 @@ void audio_worker(void*) {
 
         const bool want_audible = need_cue || need_tts;
         if (want_audible != voice_vol) {
-            audio.SetOutputVolume(want_audible ? 78 : 20);
+            audio.SetOutputVolume(want_audible ? 84 : 20);
             voice_vol = want_audible;
             if (want_audible) {
                 std::memset(tx, 0, sizeof(tx));
                 audio.Write(tx, 240); // Prime silence before PA unmute
-                tts_prev = 0; tts_prebuf_done = false;
+                tts_prev = 0; tts_prebuf_done = false; tts_rebuf = false;
             }
         }
 
         // Priority 1: Cue tone | Priority 2: Streaming 24kHz->48kHz TTS | Priority 3: Mic-only silence | Priority 4: Ultrasonic
         bool drive_pa = false;
         if (need_cue) {
+            us_holdoff = 32; // 160ms ultrasonic warmup shield after audible activity
             render_cue_block(tx, cur_cue, cue_frame++, cue_p1, cue_p2);
             drive_pa = true;
             if (cue_frame >= cur_cue.total_frames) {
@@ -249,15 +267,29 @@ void audio_worker(void*) {
                 if (cur_cue.drain_after) rx_drain = 3; // 15ms acoustic tail drain before mic capture
             }
         } else if (need_tts && tts_ring) {
+            us_holdoff = 32;
             const size_t avail = tts_avail();
-            if (!tts_prebuf_done && avail < 2400 && !tts_eof.load(std::memory_order_acquire)) {
+            const size_t target_prebuf = tts_rebuf ? 9600u : tts_init_prebuf.load(std::memory_order_relaxed);
+            if (!tts_prebuf_done && avail < target_prebuf && !tts_eof.load(std::memory_order_acquire)) {
                 std::memset(tx, 0, sizeof(tx));
+                drive_pa = pa_on; // Keep PA steady during brief rebuffer to avoid relay/pop click
             } else if (avail == 0 && tts_eof.load(std::memory_order_acquire)) {
                 tts_active.store(false, std::memory_order_release);
-                tts_prebuf_done = false;
+                tts_prebuf_done = false; tts_rebuf = false; tts_prev = 0;
                 std::memset(tx, 0, sizeof(tx));
+            } else if (avail == 0) {
+                // Rare mid-stream underrun: smooth cosine fade to 0 and re-accumulate 0.40s instead of stuttering!
+                tts_underrun_cnt.fetch_add(1, std::memory_order_relaxed);
+                for (size_t i = 0; i < 240; ++i) {
+                    tx[i] = int16_t(float(tts_prev) * (1.0f - float(i + 1) / 240.0f));
+                }
+                tts_prev = 0;
+                tts_prebuf_done = false;
+                tts_rebuf = true;
+                drive_pa = true;
             } else {
                 tts_prebuf_done = true;
+                tts_rebuf = false;
                 drive_pa = true;
                 size_t r = tts_r.load(std::memory_order_relaxed);
                 const size_t take = std::min<size_t>(120, avail);
@@ -270,6 +302,7 @@ void audio_worker(void*) {
                 tts_r.store(r + take, std::memory_order_release);
             }
         } else if (need_mic || rx_drain > 0) {
+            us_holdoff = 32;
             std::memset(tx, 0, sizeof(tx));
             drive_pa = false; // PA strictly off during mic capture!
         } else {
@@ -281,6 +314,11 @@ void audio_worker(void*) {
             if (audio.Write(tx, count) != int(count)) { fault("write"); continue; }
             set_pa(wanted.load(std::memory_order_relaxed));
             if (audio.Read(us_buf + us_filled, count) != int(count)) { fault("read"); continue; }
+            if (us_holdoff > 0) {
+                if (--us_holdoff == 0) { detector.Reset(); overruns = audio.Overruns(); }
+                us_filled = 0;
+                continue;
+            }
             us_filled += count;
             if (us_filled == 2048) {
                 ugl::DetectionStats stats; uint32_t next = audio.Overruns();
@@ -345,11 +383,13 @@ void audio_mic_start(AudioMicSink sink) { mic_sink.store(sink, std::memory_order
 void audio_mic_stop() { mic_sink.store(nullptr, std::memory_order_release); mic_active.store(false); }
 bool audio_mic_capturing() { return mic_active.load(std::memory_order_acquire); }
 
-bool audio_tts_begin() {
+bool audio_tts_begin(size_t initial_prebuf_samples) {
     if (!tts_ring) tts_ring = static_cast<int16_t*>(heap_caps_malloc(kTtsCap * sizeof(int16_t), MALLOC_CAP_SPIRAM));
     if (!tts_ring) return false;
+    tts_init_prebuf.store(std::clamp<size_t>(initial_prebuf_samples, 4800u, 24000u), std::memory_order_relaxed);
     tts_w.store(0, std::memory_order_relaxed);
     tts_r.store(0, std::memory_order_relaxed);
+    tts_underrun_cnt.store(0, std::memory_order_relaxed);
     tts_eof.store(false, std::memory_order_relaxed);
     tts_aborted.store(false, std::memory_order_relaxed);
     tts_active.store(true, std::memory_order_release);
@@ -384,6 +424,7 @@ void audio_tts_abort() {
     portEXIT_CRITICAL(&pa_guard);
 }
 bool audio_tts_playing() { return tts_active.load(std::memory_order_acquire) && !tts_aborted.load(std::memory_order_acquire); }
+uint32_t audio_tts_underruns() { return tts_underrun_cnt.load(std::memory_order_relaxed); }
 
 bool nfc_ready() { return nfc_ok; }
 bool audio_ready() { return audio_ok; }
@@ -404,7 +445,7 @@ const char* gesture_feedback() {
 }
 
 void peripherals_init() {
-    gpio_config_t outputs{}; outputs.pin_bit_mask = (1ULL << 42) | (1ULL << 46); outputs.mode = GPIO_MODE_OUTPUT;
+    gpio_config_t outputs{}; outputs.pin_bit_mask = (1ULL << 42) | (1ULL << 46); outputs.mode = GPIO_MODE_INPUT_OUTPUT;
     ESP_ERROR_CHECK(gpio_config(&outputs)); rail(GPIO_NUM_46, 0); rail(GPIO_NUM_42, 1);
     gpio_config_t cfg{}; cfg.pin_bit_mask = (1ULL << 0) | (1ULL << 39) | (1ULL << 18); cfg.mode = GPIO_MODE_INPUT; cfg.pull_up_en = GPIO_PULLUP_ENABLE;
     ESP_ERROR_CHECK(gpio_config(&cfg));

@@ -45,9 +45,9 @@ void led_tick(void*) {
             duty = 0;
             break;
         case LedMode::PTT_ON_60:
-            if (elapsed < 80) duty = 1023;
-            else if (elapsed < 130) duty = 0;
-            else duty = 614; // 60%
+            if (elapsed < 90) duty = 1023;
+            else if (elapsed < 140) duty = 0;
+            else duty = 768; // 75% bright steady green
             break;
         case LedMode::LONG_SOLID_100:
             if (elapsed < 70) duty = 1023;
@@ -83,7 +83,9 @@ void led_tick(void*) {
 } // namespace
 
 void led_power_init() {
-    // 1. GPIO3 hardware LEDC PWM (output_invert=1 handles active-low LED cleanly!)
+    // 1. Unlatch RTC pad hold on GPIO3 first (factory/board init latches GPIO3 HIGH!), then attach LEDC PWM
+    gpio_hold_dis(kLedPin);
+    gpio_reset_pin(kLedPin);
     ledc_timer_config_t tcfg{};
     tcfg.speed_mode = LEDC_LOW_SPEED_MODE;
     tcfg.duty_resolution = LEDC_TIMER_10_BIT;

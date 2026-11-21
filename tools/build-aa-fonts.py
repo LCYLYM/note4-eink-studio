@@ -37,9 +37,10 @@ def find_pingfang():
     return '/System/Library/Fonts/STHeiti Medium.ttc'
 
 
-def gb2312_level1():
+def gb2312_all():
+    """All 6,763 GB2312 Level-1 + Level-2 Hanzi (0xB0..0xF7) so neither sans nor serif ever drops a character."""
     chars = []
-    for hi in range(0xB0, 0xD8):
+    for hi in range(0xB0, 0xF8):
         for lo in range(0xA1, 0xFF):
             if hi == 0xD7 and lo >= 0xFA:
                 continue
@@ -62,7 +63,7 @@ def cjk_punct():
 
 def gallery_chars():
     found = set()
-    for rel in ('server/src/gallery.ts', 'server/src/js-templates.ts', 'server/src/skills.ts'):
+    for rel in ('server/src/gallery.ts', 'server/src/js-templates.ts', 'server/src/voice-templates.ts', 'server/src/skills.ts'):
         p = ROOT / rel
         if p.exists():
             for ch in p.read_text('utf-8', errors='ignore'):
@@ -72,11 +73,7 @@ def gallery_chars():
     extra_cn = (
         "春夏秋冬风花雪月山川湖海云雾霜露晴阴雨雷电微凉温暖清寒"
         "清晨午后傍晚深夜今明昨日周星期年月日时分秒刻节气宜忌吉凶"
-        "液态玻璃磨砂质感灰阶快刷精刷清晰排版字体对比实机验证桌面"
-        "专注心流灵感阅读写作思考静心记录时间天气温度湿度空气指数"
-        "功德退散平静安宁喜乐自由探索创造美学极简纸墨光影折射层次"
-        "北京上海广州深圳杭州成都南京武汉西安苏州重庆天津厦门青岛"
-        "一二三四五六七八九十百千万亿零壹贰叁肆伍陆柒捌玖拾"
+        "嘞咯呗嘛喔噢嗯嗨嘿哈哟呐呀啦哇啵哒咱啥咋甭怼囧啰嗦靠谱"
         "你好世界欢迎使用今日计划待办提醒清单日历时钟倒计时番茄钟"
     )
     for ch in extra_cn:
@@ -216,22 +213,18 @@ def main():
 
     ascii_cps = list(range(32, 127))
     punct = cjk_punct()
-    l1 = gb2312_level1()
+    all_gb = gb2312_all()
     gal = gallery_chars()
 
-    # Serif (24x24 4-bit 16-level AA): ASCII + punct + all gallery/UI/poetry chars + top 100 GB2312 L1 (~1300 glyphs, ~370 KiB)
-    # Any rarer Hanzi seamlessly falls back to sans (3924 glyphs) -> pixel (full GB2312).
-    serif_cps = ascii_cps + punct + gal + l1[:100]
-    # Sans (20x20 2-bit AA): ASCII + punct + all 3755 GB2312 L1 + gallery chars (~3930 glyphs, ~395 KiB)
-    sans_cps = ascii_cps + punct + l1 + gal
-    # Display (36px & 48px 4-bit 16-level AA): tabular numerals, punctuation, degree, Latin
+    # Full 6,900+ glyph CJK+Latin coverage in BOTH Sans (20x20 2bpp) AND Serif (24x24 2bpp) -> zero mixed-font fallback!
+    full_cjk_cps = ascii_cps + punct + all_gb + gal
     disp_cps = ascii_cps + [ord(c) for c in '°℃℉¥€—·±×÷']
     disp_lg_cps = [ord(c) for c in "0123456789:.%-+/,'°℃¥ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"] + [32]
 
-    print(f'Building anti-aliased multi-font pack (sans={os.path.basename(args.sans_cjk)}[{args.sans_cjk_idx}], serif={os.path.basename(args.serif_cjk)}[{args.serif_cjk_idx}]+{os.path.basename(args.latin_serif)}[{args.latin_serif_idx}], display={os.path.basename(args.display_font)})...')
+    print(f'Building full-coverage anti-aliased multi-font pack (sans={os.path.basename(args.sans_cjk)}[{args.sans_cjk_idx}], serif={os.path.basename(args.serif_cjk)}[{args.serif_cjk_idx}]+{os.path.basename(args.latin_serif)}[{args.latin_serif_idx}], display={os.path.basename(args.display_font)})...')
     faces = [
-        build_face(1, 2, 20, 20, 26, sans_cps, args.sans_cjk, args.sans_cjk_idx, 18, args.latin_sans, args.latin_sans_idx, 18, 16, 1.02),
-        build_face(2, 4, 24, 24, 31, serif_cps, args.serif_cjk, args.serif_cjk_idx, 22, args.latin_serif, args.latin_serif_idx, 21, 20, 1.02),
+        build_face(1, 2, 20, 20, 26, full_cjk_cps, args.sans_cjk, args.sans_cjk_idx, 18, args.latin_sans, args.latin_sans_idx, 18, 16, 1.02),
+        build_face(2, 2, 24, 24, 31, full_cjk_cps, args.serif_cjk, args.serif_cjk_idx, 22, args.latin_serif, args.latin_serif_idx, 21, 20, 1.02),
         build_face(3, 4, 26, 36, 40, disp_cps, args.display_font, args.display_idx, 32, args.display_font, args.display_idx, 33, 29, 1.06, disp_axes, disp_axes),
         build_face(4, 4, 34, 48, 52, disp_lg_cps, args.display_font, args.display_idx, 44, args.display_font, args.display_idx, 45, 39, 1.06, disp_axes, disp_axes),
     ]
@@ -267,7 +260,13 @@ def main():
 
     out_path = Path(args.out)
     out_path.write_bytes(out)
-    print(f"Wrote {out_path} ({total_size} bytes / {total_size/1024:.1f} KiB)")
+    import zlib, shutil
+    zz_bytes = zlib.compress(bytes(out), level=9)
+    Path(str(out_path) + '.zz').write_bytes(zz_bytes)
+    vendor_dst = ROOT / 'web/vendor/fonts_aa.bin'
+    if vendor_dst.parent.exists():
+        shutil.copy2(out_path, vendor_dst)
+    print(f"Wrote {out_path} ({total_size} bytes / {total_size/1024:.1f} KiB, .zz={len(zz_bytes)/1024:.1f} KiB)")
 
 
 if __name__ == '__main__':

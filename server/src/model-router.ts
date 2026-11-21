@@ -1,5 +1,6 @@
 import {problem} from './accounts';
 import {readJSON} from './http';
+import {sanitizeUserBaseUrl} from './dsh-auth';
 
 export const AGENT_LIMITS = {
   context_tokens: 262144,
@@ -28,7 +29,14 @@ export type StreamDelta = {
   toolArgBytes: number;
 };
 
-function friendlyModelError(err: any, base: string): string {
+export type UserModelRuntime = {
+  kind: 'dsh_token' | 'api_key';
+  token: string;
+  base_url: string;
+  model: string;
+};
+
+function friendlyModelError(err: any, base: string, isUserRuntime = false): string {
   const msg = String(err?.message ?? err ?? '未知错误');
   const code = err?.cause?.code ?? err?.code ?? '';
   console.error('NOTE4_MODEL_ERR', base, code || '-', msg.replace(/sk-[a-zA-Z0-9_-]+/g, '[redacted]').slice(0, 240));
@@ -39,7 +47,9 @@ function friendlyModelError(err: any, base: string): string {
     return '连接模型服务超时或被中断，请稍后点「继续修复」重试';
   }
   if (/MODEL_HTTP_401|MODEL_HTTP_403/.test(msg)) {
-    return '模型服务鉴权失败，请联系管理员核对配置';
+    return isUserRuntime
+      ? 'AI_CRED_REVOKED：你的 DeepSeek 登录态已在官网退出或失效，请重新登录'
+      : '模型服务鉴权失败，请联系管理员核对配置';
   }
   if (/MODEL_HTTP_404/.test(msg)) {
     return '模型接口或模型名称不可用，请联系管理员核对配置';
@@ -318,28 +328,53 @@ export class ModelRouter {
     payload: any,
     signal?: AbortSignal,
     requestMs = AGENT_LIMITS.request_ms,
-    onDelta?: (d: StreamDelta) => void
+    onDelta?: (d: StreamDelta) => void,
+    userRuntime?: UserModelRuntime
   ) {
-    if (!this.configured()) problem('AI 模型尚未配置，请点击右上角「配置 AI 模型」填入地址与 Key', 503);
+    if (!userRuntime && !this.configured()) {
+      problem('平台免费公益模型当前未开启，请点击右上角「登录 DeepSeek」使用自己的账号进行对话与制作', 503);
+    }
     await this.slot(signal);
     const meter = {known_tokens: 0, cached_tokens: 0, usage_unknown: false, request_attempts: 0};
     try {
-      const base = this.baseUrl().replace(/\/+$/, '');
-      const key = this.apiKey();
+      const rawBase = userRuntime
+        ? (userRuntime.kind === 'dsh_token' ? 'https://api.deepseek.com/v1' : String(userRuntime.base_url || 'https://api.deepseek.com').trim())
+        : this.baseUrl();
+      const cleanBase = rawBase.replace(/\/+$/, '');
+      const base = userRuntime && !cleanBase.endsWith('/v1') && !cleanBase.endsWith('/chat/completions') ? cleanBase + '/v1' : cleanBase;
+      const key = userRuntime ? userRuntime.token : this.apiKey();
       const isHttp = base.startsWith('http://');
-      if (isHttp && this.s.env.DEV_MODE !== 'true') problem('生产环境模型接口必须使用 HTTPS', 400);
-      const doFetch = isHttp ? fetch : (this.s.env.modelFetch ?? fetch);
-      const candidates = this.backends();
-      const sticky = this.s.get('model_sticky', scope)?.backend;
+      const devMode = this.s.env.DEV_MODE === 'true';
+      if (isHttp && !devMode) problem('生产环境模型接口必须使用 HTTPS', 400);
+      if (userRuntime && userRuntime.kind === 'api_key') {
+        const safeBase = sanitizeUserBaseUrl(userRuntime.base_url, devMode);
+        if (!safeBase) problem('个人模型接口地址无效或不允许访问内网地址', 400);
+      }
+      const doFetch = isHttp
+        ? fetch
+        : userRuntime && userRuntime.kind === 'api_key' && !devMode
+          ? (this.s.env.safeFetch ?? this.s.env.modelFetch ?? fetch)
+          : (this.s.env.modelFetch ?? fetch);
+      const userModelName = userRuntime ? (userRuntime.model || 'deepseek-flash') : '';
+      const candidates: Backend[] = userRuntime
+        ? [{
+            id: 'user_self',
+            model: userModelName,
+            context_tokens: 131072,
+            max_output_tokens: 16384,
+            thinking: /reasoner|v4-pro/i.test(userModelName) ? 'omit' : 'disabled',
+          }]
+        : this.backends();
+      const sticky = userRuntime ? null : this.s.get('model_sticky', scope)?.backend;
       const ordered = [...candidates].sort((a, b) => Number(b.id === sticky) - Number(a.id === sticky));
-      if (!sticky && ordered.length) {
+      if (!userRuntime && !sticky && ordered.length) {
         const n = this.cursor++ % ordered.length;
         ordered.push(...ordered.splice(0, n));
       }
       const errors: Array<{backend: string; error: string}> = [];
       let lastError = 'NO_BACKEND_AVAILABLE';
       const nowMs = Date.now();
-      let toTry = ordered.filter(b => (this.s.get('model_health', b.id)?.retry_at ?? 0) <= nowMs);
+      let toTry = userRuntime ? ordered : ordered.filter(b => (this.s.get('model_health', b.id)?.retry_at ?? 0) <= nowMs);
       if (!toTry.length && ordered.length) {
         const soonest = [...ordered].sort(
           (a, b) => (this.s.get('model_health', a.id)?.retry_at ?? 0) - (this.s.get('model_health', b.id)?.retry_at ?? 0)
@@ -375,10 +410,13 @@ export class ModelRouter {
             for (let attempt = 0; attempt < 2; attempt++) {
               try {
                 meter.request_attempts++;
+                const authHdr: Record<string, string> = userRuntime?.kind === 'dsh_token'
+                  ? {'x-dsh-auth-token': key}
+                  : {Authorization: 'Bearer ' + key};
                 res = await doFetch(endpoint, {
                   method: 'POST',
                   headers: {
-                    Authorization: 'Bearer ' + key,
+                    ...authHdr,
                     'Content-Type': 'application/json',
                     Accept: 'text/event-stream, application/json',
                     'User-Agent': 'NOTE4-Platform/2.1.0',
@@ -455,8 +493,10 @@ export class ModelRouter {
             throw Error('MODEL_INCOMPLETE_' + finishReason);
           }
 
-          this.s.put('model_health', {id: backend.id, failures: 0, retry_at: 0});
-          this.s.put('model_sticky', {id: scope, backend: backend.id});
+          if (!userRuntime) {
+            this.s.put('model_health', {id: backend.id, failures: 0, retry_at: 0});
+            this.s.put('model_sticky', {id: scope, backend: backend.id});
+          }
           return {
             data,
             route: {
@@ -473,16 +513,21 @@ export class ModelRouter {
         } catch (e: any) {
           if (signal?.aborted) throw Error('CANCELLED');
           if (e?.nonBackend) throw e;
-          lastError = friendlyModelError(e, base);
+          lastError = friendlyModelError(e, base, !!userRuntime);
           errors.push({backend: backend.id, error: lastError});
-          const failures = (this.s.get('model_health', backend.id)?.failures ?? 0) + 1;
-          const capMs = candidates.length <= 1 ? 15000 : 300000;
-          this.s.put('model_health', {
-            id: backend.id,
-            failures,
-            retry_at: Date.now() + Math.min(capMs, 1000 * 2 ** Math.min(failures, 6)),
-            last_error: lastError,
-          });
+          if (userRuntime && /MODEL_HTTP_401|MODEL_HTTP_403/.test(String(e?.message ?? ''))) {
+            problem(lastError, 401, 'AI_CRED_REVOKED');
+          }
+          if (!userRuntime) {
+            const failures = (this.s.get('model_health', backend.id)?.failures ?? 0) + 1;
+            const capMs = candidates.length <= 1 ? 15000 : 300000;
+            this.s.put('model_health', {
+              id: backend.id,
+              failures,
+              retry_at: Date.now() + Math.min(capMs, 1000 * 2 ** Math.min(failures, 6)),
+              last_error: lastError,
+            });
+          }
         } finally {
           clearTimeout(timer);
           signal?.removeEventListener('abort', abort);

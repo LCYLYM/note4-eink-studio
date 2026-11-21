@@ -21,13 +21,13 @@ constexpr size_t N=30000;
 std::atomic<bool> still{true},tuned{false};
 std::atomic<bool> stop{false},busy{false},quiesced{true},fault{false};
 SemaphoreHandle_t mutex;TaskHandle_t display_task=nullptr;std::string message_pending,message_active;std::atomic<uint32_t> frames_dropped{0},scans{0},scan_us{0},submitted{0};
-uint8_t *pending,*frame,*mask,*previous,*card,*card_pending,*white;
+uint8_t *pending,*frame,*mask,*previous,*card,*card_pending,*white,*dma_tx;
 motion::HistoryPixel* pixels;motion::Excursion* history;
 int request=0;bool newframe=false;
 spi_device_handle_t spi=nullptr;zectrix_epd_handle_t official=nullptr;
 bool rail=false;std::atomic<bool> analog{false},valid{false};
 int64_t now(){return esp_timer_get_time();}
-bool transfer(bool data,const uint8_t* b,size_t n){gpio_set_level(GPIO_NUM_10,data);gpio_set_level(GPIO_NUM_11,0);while(n){size_t k=std::min(n,size_t(4096));spi_transaction_t t{};t.length=k*8;t.tx_buffer=b;if(spi_device_transmit(spi,&t)!=ESP_OK){gpio_set_level(GPIO_NUM_11,1);return false;}b+=k;n-=k;}gpio_set_level(GPIO_NUM_11,1);return true;}
+bool transfer(bool data,const uint8_t* b,size_t n){gpio_set_level(GPIO_NUM_10,data);gpio_set_level(GPIO_NUM_11,0);while(n){size_t k=std::min(n,size_t(2048));memcpy(dma_tx,b,k);spi_transaction_t t{};t.length=k*8;t.tx_buffer=dma_tx;if(spi_device_polling_transmit(spi,&t)!=ESP_OK){gpio_set_level(GPIO_NUM_11,1);return false;}b+=k;n-=k;}gpio_set_level(GPIO_NUM_11,1);return true;}
 bool reg(uint8_t c,const uint8_t*b=nullptr,size_t n=0){return transfer(false,&c,1)&&(!n||transfer(true,b,n));}
 bool byte(uint8_t c,uint8_t d){return reg(c,&d,1);}
 bool wait_busy(unsigned pre=0){int64_t t=now();if(pre)vTaskDelay(pdMS_TO_TICKS(pre));while(!gpio_get_level(GPIO_NUM_8)){if(stop||now()-t>5000000)return false;vTaskDelay(1);}return !stop;}
@@ -35,7 +35,7 @@ void release(){valid=false;if(spi){if(rail&&analog&&!stop&&gpio_get_level(GPIO_N
 bool create_official(){release();zectrix_epd_config_t c;zectrix_epd_get_default_config(&c);return zectrix_epd_new(&c,&official)==ESP_OK;}
 bool baseline(bool black){if(!create_official())return false;memset(white,black?0:255,15000);bool ok=zectrix_epd_power_on(official)==ESP_OK&&!stop&&zectrix_epd_refresh_full_1bpp(official,white,15000)==ESP_OK;zectrix_epd_power_off(official);release();return ok&&!stop;}
 bool custom_init(){
- spi_bus_config_t b{};b.mosi_io_num=13;b.miso_io_num=-1;b.sclk_io_num=12;b.quadwp_io_num=-1;b.quadhd_io_num=-1;b.max_transfer_sz=4096;
+ spi_bus_config_t b{};b.mosi_io_num=13;b.miso_io_num=-1;b.sclk_io_num=12;b.quadwp_io_num=-1;b.quadhd_io_num=-1;b.max_transfer_sz=2048;
  if(spi_bus_initialize(SPI3_HOST,&b,SPI_DMA_CH_AUTO)!=ESP_OK)return false;
  spi_device_interface_config_t d{};d.clock_speed_hz=20000000;d.spics_io_num=-1;d.queue_size=1;if(spi_bus_add_device(SPI3_HOST,&d,&spi)!=ESP_OK){spi_bus_free(SPI3_HOST);return false;}
  if(stop||panel_locked()){return false;}gpio_hold_dis(GPIO_NUM_6);gpio_set_level(GPIO_NUM_6,1);gpio_hold_en(GPIO_NUM_6);if(stop||panel_locked()){return false;}rail=true;gpio_set_level(GPIO_NUM_9,1);vTaskDelay(pdMS_TO_TICKS(10));gpio_set_level(GPIO_NUM_9,0);vTaskDelay(pdMS_TO_TICKS(20));gpio_set_level(GPIO_NUM_9,1);vTaskDelay(pdMS_TO_TICKS(10));
@@ -58,15 +58,15 @@ void task(void*){startup_ready(DISPLAY_MANAGER);
   if(work==3){busy=true;if(!home())fault=true;busy=false;}
   if(work==1){busy=true;release();bool ok=create_official();memset(white,255,15000);if(ok)ok=zectrix_epd_power_on(official)==ESP_OK&&zectrix_epd_refresh_full_1bpp(official,white,15000)==ESP_OK&&!stop;if(ok){ok=zectrix_epd_power_off(official)==ESP_OK&&!stop;if(ok)ok=zectrix_epd_power_on(official)==ESP_OK&&!stop;if(ok)ok=zectrix_epd_refresh_full_4bpp(official,card,60000)==ESP_OK;}release();busy=false;if(!ok){fault=true;stop=true;}}
   if(work==2){busy=true;auto rebase_t=now();release();bool ok=baseline(true)&&custom_init();memset(mask,255,N);for(int i=0;i<12&&ok;++i)ok=scan();constexpr unsigned doses[]={11,8,4,0};for(unsigned step=0;step<11&&ok;++step){for(size_t b=0;b<N;++b){unsigned m=0;for(unsigned k=0;k<4;++k){unsigned shift=6-2*k;if(step<doses[(frame[b]>>shift)&3])m|=2u<<shift;}mask[b]=m;}ok=scan();}printf("NOTE4 REBASE {\"ok\":%s,\"ms\":%d}\n",ok?"true":"false",(int)((now()-rebase_t)/1000));if(ok){plan.seed(frame);memset(mask,0,N);valid=true;}else {fault=true;stop=true;}busy=false;}
-  if(valid&&!stop&&(changed||budget)){if(changed){plan.tuned=tuned;if(still)plan.settle();}unsigned active=plan.prepare(frame,mask);budget=active!=0;if(active){busy=true;if(scan())plan.delivered(mask);else {fault=true;stop=true;}busy=false;}}
+  if(valid&&!stop&&(changed||budget)){if(changed){plan.tuned=tuned;if(still)plan.settle();}unsigned active=plan.prepare(frame,mask);budget=active!=0;if(active){busy=true;bool sok=scan();if(!sok&&!stop){analog=false;vTaskDelay(pdMS_TO_TICKS(20));sok=scan();}if(sok)plan.delivered(mask);else {fault=true;stop=true;}busy=false;}}
   if(budget||changed)last_drive=now();
   // Keep controller RAM and pulse history, but remove panel high voltage when idle.
-  if(analog&&!budget&&!changed&&now()-last_drive>300000){if(byte(2,0)&&wait_busy(10))analog=false;else{fault=true;stop=true;}}
+  if(analog&&!budget&&!changed&&now()-last_drive>300000){if(byte(2,0)&&wait_busy(10))analog=false;else{vTaskDelay(pdMS_TO_TICKS(15));if(byte(2,0)&&wait_busy(10))analog=false;else analog=false;}}
   if(budget)vTaskDelay(pdMS_TO_TICKS(10));else ulTaskNotifyTake(pdTRUE,pdMS_TO_TICKS(300));
  }
 }
 }
-bool display_init(){mutex=xSemaphoreCreateMutex();if(!mutex)return false;auto alloc=[](size_t n){return (uint8_t*)heap_caps_malloc(n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);};pending=alloc(N);frame=alloc(N);mask=alloc(N);previous=alloc(N);card=alloc(60000);card_pending=alloc(60000);white=alloc(15000);pixels=(motion::HistoryPixel*)alloc(240000);history=(motion::Excursion*)alloc(360000);if(!pending||!frame||!mask||!previous||!card||!card_pending||!white||!pixels||!history)return false;gpio_config_t g{};g.pin_bit_mask=(1ULL<<6)|(1ULL<<9)|(1ULL<<10)|(1ULL<<11);g.mode=GPIO_MODE_OUTPUT;gpio_config(&g);g.pin_bit_mask=1ULL<<8;g.mode=GPIO_MODE_INPUT;gpio_config(&g);panel_emergency_cut();return xTaskCreate(task,"display_owner",6144,nullptr,4,&display_task)==pdPASS;}
+bool display_init(){mutex=xSemaphoreCreateMutex();if(!mutex)return false;auto alloc=[](size_t n){return (uint8_t*)heap_caps_malloc(n,MALLOC_CAP_SPIRAM|MALLOC_CAP_8BIT);};pending=alloc(N);frame=alloc(N);mask=alloc(N);previous=alloc(N);card=alloc(60000);card_pending=alloc(60000);white=alloc(15000);dma_tx=(uint8_t*)heap_caps_malloc(2048,MALLOC_CAP_DMA|MALLOC_CAP_INTERNAL);pixels=(motion::HistoryPixel*)alloc(240000);history=(motion::Excursion*)alloc(360000);if(!pending||!frame||!mask||!previous||!card||!card_pending||!white||!dma_tx||!pixels||!history)return false;gpio_config_t g{};g.pin_bit_mask=(1ULL<<6)|(1ULL<<9)|(1ULL<<10)|(1ULL<<11);g.mode=GPIO_MODE_OUTPUT;gpio_config(&g);g.pin_bit_mask=1ULL<<8;g.mode=GPIO_MODE_INPUT;gpio_config(&g);panel_emergency_cut();return xTaskCreate(task,"display_owner",6144,nullptr,4,&display_task)==pdPASS;}
 bool display_card(const uint8_t* p,size_t n){if(n!=60000||panel_locked()||busy||(stop&&!quiesced))return false;xSemaphoreTake(mutex,portMAX_DELAY);memcpy(card_pending,p,n);fault=false;stop=false;request=1;xSemaphoreGive(mutex);if(display_task)xTaskNotifyGive(display_task);return true;}
 bool display_frame(const uint8_t*p,size_t n){if(n!=N||panel_locked()||(stop&&!quiesced))return false;xSemaphoreTake(mutex,portMAX_DELAY);if(newframe)++frames_dropped;++submitted;memcpy(pending,p,n);if(!valid&&!busy){fault=false;stop=false;request=2;}newframe=true;xSemaphoreGive(mutex);if(display_task)xTaskNotifyGive(display_task);return true;}
 void display_tune(bool settle,bool compensate){still=settle;tuned=compensate;}void display_rebase(){valid=false;}

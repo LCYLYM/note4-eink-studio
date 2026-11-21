@@ -2,14 +2,14 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed} from './voice-ui.js?v=27';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=34';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
 const esc = v => String(v ?? '').replace(/[&<>"']/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}[c]));
 const kb = n => (n / 1024 < 10 ? (n / 1024).toFixed(1) : Math.round(n / 1024)).toString();
 const tokFmt = n => (!n || n <= 0 ? '' : n < 1000 ? `${n} tok` : `${(n / 1000).toFixed(1)}K`);
-const renderReplyHtml = text => esc(text ?? '').replace(/`([^`\n]{1,80})`/g, '<code>$1</code>');
+const renderReplyHtml = text => esc(text ?? '').replace(/`([^`\n]{1,80})`/g, '<code>$1</code>').replace(/\n/g, '<br>');
 function friendlyTaskError(raw) {
   const s = String(raw ?? '').trim();
   if (!s) return '制作未完成，请点「继续修复」重试';
@@ -19,6 +19,7 @@ function friendlyTaskError(raw) {
   if (/CONTEXT_REQUIRES_SLICES/.test(s)) return '对话内容偏长，建议点「新开对话」清空旧上下文后再继续（代码会完整保留）';
   if (/MODEL_TRUNCATED/.test(s)) return '模型单次输出过长被截断，点「继续修复」会改为小步增量修改';
   if (/Service restarted/.test(s)) return '服务刚刚重启更新，草稿已保留，点「继续修复」即可接着做';
+  if (/AI_CRED_REVOKED/.test(s)) return '你的 DeepSeek 登录态已在官网退出或失效，已自动清理本地登录态，请点击右上角重新登录';
   return s;
 }
 const bytes = s => new TextEncoder().encode(String(s ?? '')).length;
@@ -41,19 +42,19 @@ const STEPS = {
 };
 
 const HERO_PICKS = [
+  {id: 'voice_board', label: '语音待办管家'},
   {id: 'muyu', label: '赛博木鱼'},
   {id: 'relay_board', label: '云端桌贴'},
   {id: 'claude_hud', label: 'AI 任务盯盘'},
   {id: 'pomodoro', label: '种树番茄钟'},
   {id: 'iching', label: '周易六十四卦'},
-  {id: 'pet', label: '电子宠物'},
 ];
 
 const STARTER_CHIPS = [
+  {label: '语音饮水咖啡管家', prompt: '做一个桌面饮水与咖啡因管家，单击确定喝水+250ml，挥手记美式，接入语音+Agent组件支持直接说话记毫升、记拿铁或改每日目标'},
   {label: '电脑任务盯盘', prompt: '做一个电脑任务盯盘看板，通过数据推送通道接收我的电脑任务名、进度和状态，按确定键回传确认'},
-  {label: '桌面便签留言板', prompt: '做一个桌面留言板，通过数据推送通道接收我从电脑或手机发来的文字大字展示，挥手刷新，按确定回传已阅'},
   {label: '25 分钟种树番茄钟', prompt: '做一个 25 分钟种树番茄钟，随专注进度长出一棵像素小树，挥手暂停或继续，记录本周专注次数'},
-  {label: '四级单词闪卡', prompt: '做一个英语单词记忆卡片，先显示英文，按确定翻看中文和例句，区分认识和待复习并记录进度'},
+  {label: '语音冰箱食材管家', prompt: '做一个冰箱食材保质期管家，上下选食材、单击确定标为已吃掉，接入语音+Agent组件支持开口放进新食材和保质天数'},
 ];
 
 const MODEL_PRESETS = [
@@ -93,14 +94,16 @@ const S = {
   works: [],
   templates: null,
   tplCache: new Map(),
-  heroId: 'muyu',
+  heroId: 'voice_board',
   heroStore: {},
+  wantVoiceComp: false,
   catFilter: '全部',
   search: '',
   work: null,
   relay: null,
   inspectorTab: 'code',
   openDet: {settings: false, code: false},
+  simTextOpen: false,
   netLogs: [],
   task: null,
   pendingMsg: '',
@@ -118,15 +121,29 @@ const S = {
 const usb = new Note4USB();
 let vm, tickTimer, elapsedTimer, pollTimer, taskES = null, frameCache, inAutoTick = false;
 const previewAutoNetAt = new Map();
+const simHwVoice = createSimHardwareVoice({
+  getCtx: () => ({vm, work: S.work, voiceMode: S.view === 'app' ? (S.work?.spec?.js?.voice?.mode || 'off') : 'off'}),
+  onKeyOk: () => press('ok'),
+  onRevoked: () => { S.aiCred = null; render(); },
+  api, paint, tell, usb,
+});
+function autoGrowPrompt(el = $('#prompt')) {
+  if (!el || el.tagName !== 'TEXTAREA') return;
+  el.style.height = 'auto';
+  const next = Math.min(132, Math.max(44, el.scrollHeight));
+  el.style.height = next + 'px';
+  el.style.overflowY = el.scrollHeight > 132 ? 'auto' : 'hidden';
+}
 
 async function api(path, method = 'GET', body) {
+  const extra = path.startsWith('/ai-cred') || path.startsWith('/ai/tasks') ? voiceCredHeaders() : {};
   const r = await fetch('/api' + path, {
     method,
-    headers: body === undefined ? {} : {'Content-Type': 'application/json'},
+    headers: body === undefined ? extra : {'Content-Type': 'application/json', ...extra},
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   const data = await r.json().catch(() => ({error: 'HTTP ' + r.status}));
-  if (!r.ok) throw Object.assign(Error(data.error || data.message || data.detail || 'HTTP ' + r.status), {status: r.status});
+  if (!r.ok) throw Object.assign(Error(data.error || data.message || data.detail || 'HTTP ' + r.status), {status: r.status, code: data.code});
   return data;
 }
 
@@ -214,7 +231,7 @@ async function engine() {
   const [w, f, af] = await Promise.all([
     fetch('vendor/note4_vm.wasm?v=27'),
     fetch('vendor/font16.bin'),
-    fetch('vendor/fonts_aa.bin?v=24').catch(() => null),
+    fetch('vendor/fonts_aa.bin?v=30').catch(() => null),
   ]);
   if (!w.ok || !f.ok) throw Error('真机预览引擎加载失败，请刷新重试');
   const aaBytes = af && af.ok ? new Uint8Array(await af.arrayBuffer()) : undefined;
@@ -320,10 +337,18 @@ async function pump(q) {
   }
 }
 
+const VOICE_SHIM_WEB = "function voice(o){function _vw(s){var t=String(s);return typeof ui==='object'&&ui&&ui.measure?ui.measure(t,1):t.length*20;}function _vc(s,w){s=String(s);if(_vw(s)<=w)return s;while(s.length>1&&_vw(s+'..')>w)s=s.slice(0,-1);return s+'..';}var V={st:'就绪',msg:'',off:0,badge:function(){return V.st;},reply:function(fb){var t=V.msg||fb||'';return V.off>0&&t.length>V.off?t.slice(V.off):t;},bar:function(x,y,w,fb,g){var t=V.reply(fb);if(t)ui.text(x,y,_vc(t,w),1,g===undefined?5:g);},box:function(x,y,w,fb,g){var t=V.reply(fb);if(t)ui.text(x,y,_vc(t,w*2-10),1,g===undefined?5:g,w);},step:function(){var t=V.msg||'';if(t.length>18){V.off=(V.off+12>=t.length)?0:(V.off+12);return true;}return false;}};if(typeof agent==='object'&&agent&&typeof agent.config==='function'){var raw=o&&o.tools||[],ts=[],i;for(i=0;i<raw.length;i++)(function(t){ts.push({name:t.name,desc:t.desc||t.description||t.name,params:t.params||{},run:function(a){var r=t.run(a||{});if(typeof draw==='function')draw();return r===undefined?{ok:true}:r;}});})(raw[i]);agent.config({role:String(o&&o.role||'贴心干练的墨水屏随身搭档'),state:o&&o.state||function(){return typeof S!=='undefined'?S:{};},tools:ts,on_event:function(ev){var p=ev&&ev.phase||'idle',tx=ev&&ev.text||'';V.st=p==='listening'?(tx.indexOf('长录')===0?'长录中':'录音中'):p==='uploading'?'识别中':p==='thinking'?'思考中':p==='speaking'?'播报中':p==='error'?'请重试':'就绪';if((p==='speaking'||p==='done'||p==='error')&&tx){V.msg=tx;V.off=0;if(tx.length>18&&typeof ui==='object'&&ui.tick)ui.tick(3800);}if(o&&o.on_event)o.on_event(ev,V);if(typeof draw==='function')draw();}});if(typeof globalThis==='object'&&typeof globalThis.on_tick!=='function')globalThis.on_tick=function(){if(V.step()&&typeof draw==='function')draw();};}return V;}\n";
+
 function buildPreamble(j) {
   const effSecret = j.secret || (j.conn_mode === 'relay' && j.relay_url ? j.relay_url : '');
+  const needVoiceShim = /\bvoice\s*\(/.test(j.source || '') && !/function\s+voice\s*\(/.test(j.source || '');
+  const fontPre = j.font && ['sans', 'serif', 'pixel'].includes(j.font)
+    ? `(function(_f){if(typeof ui==='object'&&typeof ui.font==='function'){var _o=ui.font;_o(_f);ui.font=function(n,s){if(!arguments.length)return _o();if(n==='display'||n==='display_lg')return _o(n,s);return _o(_f);};}})(${JSON.stringify(j.font)});\n`
+    : '';
   return (j.relay_url ? `var N4_RELAY=${JSON.stringify(j.relay_url)};\n` : '') +
-         (effSecret ? `var SECRET=${JSON.stringify(effSecret)};\n` : '');
+         (effSecret ? `var SECRET=${JSON.stringify(effSecret)};\n` : '') +
+         fontPre +
+         (needVoiceShim ? VOICE_SHIM_WEB : '');
 }
 
 async function runHero(id = S.heroId, keepStore = false) {
@@ -641,27 +666,35 @@ function follow(t) {
 }
 
 async function finish(t) {
+  if (t?.state === 'failed' && /AI_CRED_REVOKED/.test(t.error || '') && S.aiCred?.configured) {
+    clearLocalVoiceCred();
+    S.aiCred = null;
+    if (usb?.port) usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+    tell('检测到 DeepSeek 账号已在官网退出或失效，已自动清除本地登录态，请重新登录');
+  }
   if (S.work?.id === t.work_id) {
     try {
       await reload(true);
     } catch {}
     scrollChatBottom();
-    if (t.state === 'completed') tell('已完成制作并通过核验');
+    if (t.state === 'completed' && t.actual_rev && t.actual_rev !== t.base_rev) tell('已完成制作并通过核验');
   } else {
     renderStream();
   }
 }
 
-async function ask(text) {
-  if (S.config?.model?.status !== 'CONFIGURED') {
-    modelDialog();
+async function ask(text, opts = {}) {
+  const hasModel = S.config?.model?.status === 'CONFIGURED' || !!S.aiCred?.configured;
+  if (!hasModel) {
+    ACTS.voiceCred();
     return;
   }
   if (ACTIVE.includes(S.task?.state)) {
-    tell('AI 正在制作中，请等它完成或先点停止');
+    tell('AI 正在回复或制作中，请稍候或先点停止');
     return;
   }
-  // Optimistic UI: show user's message & streaming indicator immediately
+  const voiceComp = !!(opts.voiceComp || S.wantVoiceComp);
+  // Optimistic UI: show user's clean message & streaming indicator immediately
   S.pendingMsg = text;
   updateTimelineOnly();
   renderStream();
@@ -670,7 +703,7 @@ async function ask(text) {
     const fresh = await api('/works/' + S.work.id);
     S.work = fresh;
     S.liveDraftRev = fresh.rev;
-    return api('/ai/tasks', 'POST', {work_id: S.work.id, base_rev: S.work.rev, message: text});
+    return api('/ai/tasks', 'POST', {work_id: S.work.id, base_rev: S.work.rev, message: text, ...(voiceComp ? {voice_component: true} : {})});
   };
   let task;
   try {
@@ -708,14 +741,15 @@ async function ask(text) {
 }
 
 async function create(text) {
-  if (text && S.config?.model?.status !== 'CONFIGURED') {
+  const hasModel = S.config?.model?.status === 'CONFIGURED' || !!S.aiCred?.configured;
+  if (text && !hasModel) {
     remember('pendingPrompt', text);
-    modelDialog(true);
+    ACTS.voiceCred();
     return;
   }
   const w = await api('/works', 'POST', {kind: 'js'});
   await openWork(w.id, w);
-  if (text) await ask(text);
+  if (text) await ask(text, {voiceComp: S.wantVoiceComp});
   loadWorks().catch(() => {});
 }
 
@@ -852,6 +886,9 @@ async function push() {
   const op = await api(`/devices/${encodeURIComponent(usb.device.id)}/install`, 'POST', {build_id: built.build_id});
   const file = await fetch(built.artifact_url); if (!file.ok) throw Error('安装包下载失败');
   try {
+    if (w.spec?.js?.voice?.mode && w.spec.js.voice.mode !== 'off') {
+      await syncVoiceCredOverUsb(usb).catch(() => {});
+    }
     const state = await usb.upload(new Uint8Array(await file.arrayBuffer()), {buildId: built.build_id, commandId: op.command_id, onProgress: p => setPush(p < 1 ? `写入 ${Math.round(p * 100)}%` : '等待确认')});
     await api('/usb/observed', 'POST', {device_id: usb.device.id, command_id: op.command_id, status: state});
     const on = recall('written') ?? {}; on[w.id] = w.rev; remember('written', on);
@@ -988,8 +1025,9 @@ function topbarHtml() {
     ? `<button class="pill-btn" data-act="modelCfg"><span class="dot ${modelOk ? 'on' : 'warn'}"></span>${modelOk ? 'AI 已就绪' : '配置 AI'}</button>`
     : '';
   const voiceOk = !!S.aiCred?.configured;
-  const voiceBtn = S.user
-    ? `<button class="pill-btn" data-act="voiceCred"><span class="dot ${voiceOk ? 'on' : ''}"></span>${voiceOk ? '语音已绑定' : '语音登录'}</button>`
+  const curUserModel = S.aiCred?.model || 'deepseek-flash';
+  const voiceBtn = (S.user || S.config?.dev_mode)
+    ? `<button class="pill-btn" data-act="voiceCred"><span class="dot ${voiceOk ? 'on' : ''}"></span>${voiceOk ? `个人 · ${esc(curUserModel)}` : '登录 DeepSeek'}</button>`
     : '';
   return `<header class="topbar" id="topbar">
     <button type="button" class="brand-btn" data-act="home"><span class="brand-mark">N4</span><span>NOTE4 创作台</span></button>
@@ -1030,7 +1068,7 @@ function renderGalleryCards() {
   }
   return `<div class="tpls">${filtered.map(t => `<article class="tpl-card">
     <button type="button" class="tpl-thumb-btn" data-act="tpl" data-id="${esc(t.id)}" aria-label="打开并改装 ${esc(t.title)}">
-      <img src="thumbs/${esc(t.id)}.png?v=22" alt="${esc(t.title)}" loading="lazy" width="400" height="300">
+      <img src="thumbs/${esc(t.id)}.png?v=34" alt="${esc(t.title)}" loading="lazy" width="400" height="300">
     </button>
     <div class="tpl-body">
       <div class="tpl-top">
@@ -1077,10 +1115,13 @@ function homeHtml() {
         <form data-form="new" class="composer">
           <textarea id="prompt" rows="2" aria-label="描述你想做的墨水屏应用" placeholder="例如：做一个桌面番茄钟、每日天气，或接收电脑推送状态的看板..."></textarea>
           <div class="composer-foot">
-            <span class="small" style="display:inline-flex;align-items:center;gap:6px">
-              <span class="dot ${modelOk ? 'on' : 'warn'}"></span>
-              ${modelOk ? 'AI 已就绪' : 'AI 模型待配置'}
-              ${!modelOk ? `<button type="button" class="link under" data-act="modelCfg">去配置</button>` : ''}
+            <span class="small" style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+              ${S.aiCred?.configured
+                ? `<span class="dot on"></span>个人账号 · ${esc(S.aiCred.model || 'deepseek-flash')}<button type="button" class="link under" data-act="voiceCred">切换模型</button>`
+                : modelOk
+                  ? `<span class="dot warn"></span>限量公益通道（不稳定）<button type="button" class="link under" data-act="voiceCred">登录个人账号</button>`
+                  : `<span class="dot warn"></span>请先绑定模型账号<button type="button" class="link under" data-act="voiceCred">登录 DeepSeek</button>`}
+              <button type="button" class="chip" data-act="toggleVoiceComp" aria-pressed="${S.wantVoiceComp}" title="开启后自动接入端侧语音+Agent标准组件（按住短录/插话、双击长录，保留单击/上下/挥手原交互）">${S.wantVoiceComp ? '✓ 已挂语音+Agent组件' : '+ 语音+Agent组件'}</button>
             </span>
             <button class="btn solid">开始制作</button>
           </div>
@@ -1177,7 +1218,9 @@ function smartFollowupChips() {
   if (!S.work) return [];
   const j = S.work.spec.js, tpl = templateMeta(j.gallery);
   const mode = S.relay?.enabled ? 'relay' : resolveConnMode(j, tpl);
+  const hasVoice = !!(j.voice && j.voice.mode && j.voice.mode !== 'off');
   const chips = [];
+  if (!hasVoice) chips.push({label: '一键接入语音+Agent组件', prompt: '帮我给当前应用接入语音和 Agent 助手，保持现有界面与按键挥手交互不变，支持按住确认键说话操控', voiceComp: true});
   if (mode !== 'relay') chips.push({label: '改成支持电脑定时推送', prompt: '帮我把这个应用接入数据推送通道 RELAY，支持从电脑定时推送 JSON 数据更新画面，并在源码首行写明 RELAY_JSON 字段示例'});
   if (!j.wave) chips.push({label: '加上隔空挥手操作', prompt: '开启隔空挥手支持，挥手时触发最常用的快捷动作，并在底部提示里写清楚'});
   chips.push(
@@ -1191,14 +1234,15 @@ function renderTimelineHtml() {
   const doneTasks = S.tasks.filter(t => t.id !== S.task?.id || !ACTIVE.includes(t.state));
   const busy = ACTIVE.includes(S.task?.state) || !!S.pendingMsg;
   if (!doneTasks.length && !S.pendingMsg) {
-    return `<p class="small">直接说你想怎么改，AI 会自动调整代码并在右侧预览屏运行。</p>`;
+    return `<p class="small">直接提问了解平台能力，或说出你想怎么改，AI 会在右侧预览屏实时呈现。</p>`;
   }
   const latestDone = doneTasks.at(-1);
   const items = doneTasks.slice(-12).map(t => {
     const ok = t.state === 'completed';
     const isLatestRecoverable = t === latestDone && !busy && ['failed', 'paused'].includes(t.state) && t.id !== S.task?.id;
+    const didChange = t.actual_rev && t.actual_rev !== t.base_rev;
     const tok = tokFmt(t.tokens);
-    const meta = [t.actual_rev ? `v${t.actual_rev}` : '', tok, ago(t.created_at)].filter(Boolean).join(' · ');
+    const meta = [didChange ? `v${t.actual_rev}` : '', tok, ago(t.created_at)].filter(Boolean).join(' · ');
     const answerHtml = t.reply
       ? renderReplyHtml(t.reply)
       : ok
@@ -1213,7 +1257,7 @@ function renderTimelineHtml() {
         <span class="num">${esc(meta)}</span>
         <span style="display:inline-flex;gap:10px;align-items:center">
           ${isLatestRecoverable ? `<button type="button" class="link under" data-act="resumeTask" data-id="${esc(t.id)}">继续修复</button>` : ''}
-          ${t.actual_rev && t.actual_rev !== S.work.rev ? `<button type="button" class="link under" data-act="restore" data-rev="${t.actual_rev}">恢复到 v${t.actual_rev}</button>` : ''}
+          ${didChange && t.actual_rev !== S.work.rev ? `<button type="button" class="link under" data-act="restore" data-rev="${t.actual_rev}">恢复到 v${t.actual_rev}</button>` : ''}
         </span>
       </div>
     </div>`;
@@ -1234,20 +1278,21 @@ function renderStream() {
   const el = $('#stream'), t = S.task;
   if (!el) return;
   if (S.pendingMsg && (!t || !ACTIVE.includes(t.state))) {
-    el.innerHTML = `<div class="stream-card"><div class="phases"><span class="now"><span class="dot"></span>理解需求</span><span><span class="dot"></span>编写代码</span><span><span class="dot"></span>真机核验</span><span class="timer num">0.0s</span></div><div style="font-size:13px">正在连接 AI 引擎...</div></div>`;
+    el.innerHTML = `<div class="stream-card"><div class="phases"><span class="now"><span class="dot"></span>AI 思考中</span><span class="timer num">0.0s</span></div><div style="font-size:13px">正在连接 AI...</div></div>`;
     return;
   }
   if (!t || t.work_id !== S.work?.id) { el.innerHTML = ''; return; }
   const list = parseSteps(t), active = ACTIVE.includes(t.state), done = t.state === 'completed';
   if (!active && done && S.tasks.some(x => x.id === t.id)) { el.innerHTML = ''; return; }
 
+  const isCodeWork = list.length > 0 || !!t.live_tool;
   const liveToolPhase = t.live_tool ? (STEPS[t.live_tool]?.[0] ?? '编写代码') : null;
   const cur = active ? PHASES.indexOf(liveToolPhase ?? list.at(-1)?.phase ?? '理解需求') : -1;
 
   let lineHtml = '';
   if (active) {
     if (S.cancelling) {
-      lineHtml = '正在停止本次制作...';
+      lineHtml = '正在停止...';
     } else if (t.live_reply && !t.live_tool) {
       lineHtml = `<div class="stream-live">${renderReplyHtml(t.live_reply)}</div>`;
     } else if (t.live_tool) {
@@ -1255,20 +1300,34 @@ function renderStream() {
       const sz = t.live_bytes > 200 ? `（${kb(t.live_bytes)} KB）` : '';
       lineHtml = esc(`正在${toolLabel}${sz}...`);
     } else {
-      lineHtml = esc(list.at(-1)?.text ?? (t.state === 'queued' ? '排队中...' : '正在思考方案...'));
+      lineHtml = esc(list.at(-1)?.text ?? (t.state === 'queued' ? '排队中...' : '正在思考...'));
     }
   } else if (done) {
-    lineHtml = renderReplyHtml(t.reply || '已完成制作，右侧预览已更新。');
+    lineHtml = renderReplyHtml(t.reply || (isCodeWork ? '已完成制作，右侧预览已更新。' : '已回复。'));
   } else if (t.state === 'cancelled') {
-    lineHtml = '已停止本次制作';
+    lineHtml = '已停止';
   } else if (t.state === 'unconfigured') {
-    lineHtml = '请先配置 AI 模型接口';
+    lineHtml = '请先登录个人 DeepSeek 账号或配置模型接口';
   } else {
-    lineHtml = esc((t.state === 'paused' ? '已暂停：' : '制作失败：') + friendlyTaskError(t.error));
+    lineHtml = esc((t.state === 'paused' ? '已暂停：' : '请求未完成：') + friendlyTaskError(t.error));
   }
 
   const sec = Math.max(0, ((t.completed_at || Date.now()) - (t.created_at || Date.now())) / 1000).toFixed(1);
   const tok = tokFmt(t.tokens);
+
+  if (!isCodeWork) {
+    el.innerHTML = `<div class="stream-card ${['failed', 'unconfigured'].includes(t.state) ? 'err-card' : ''}">
+      <div class="phases">
+        <span class="${done ? 'done' : 'now'}"><span class="dot"></span>${done ? '已回复' : 'AI 回复中'}</span>
+        <span class="timer num" id="taskTimer">${sec}s</span>
+        ${tok ? `<span class="small num">${esc(tok)}</span>` : ''}
+      </div>
+      <div style="font-size:13px">${lineHtml}</div>
+      ${['failed', 'paused'].includes(t.state) ? `<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn sm soft" data-act="resume">重试</button><button type="button" class="link" data-act="resetContext">新开对话</button></div>` : ''}
+      ${t.state === 'unconfigured' ? `<div><button type="button" class="btn sm solid" data-act="voiceCred">登录 DeepSeek</button></div>` : ''}
+    </div>`;
+    return;
+  }
 
   el.innerHTML = `<div class="stream-card ${['failed', 'unconfigured'].includes(t.state) ? 'err-card' : ''}">
     <div class="phases">
@@ -1281,7 +1340,7 @@ function renderStream() {
     ${active && S.liveDraftRev > (t.base_rev ?? 0) ? `<div class="small" style="color:var(--ok)">草稿 v${S.liveDraftRev} 已同步到右侧预览屏</div>` : ''}
     ${S.openSteps ? `<ol class="steps-log">${list.map(s => `<li${s.bad ? ' style="color:var(--bad)"' : ''}>${esc(s.phase)} · ${esc(s.text)}</li>`).join('') || '<li>等待开始...</li>'}</ol>` : ''}
     ${['failed', 'paused'].includes(t.state) ? `<div style="display:flex;gap:8px;align-items:center"><button type="button" class="btn sm soft" data-act="resume">继续修复</button><button type="button" class="link" data-act="resetContext">新开对话</button></div>` : ''}
-    ${t.state === 'unconfigured' ? `<div><button type="button" class="btn sm solid" data-act="modelCfg">配置 AI 模型</button></div>` : ''}
+    ${t.state === 'unconfigured' ? `<div><button type="button" class="btn sm solid" data-act="voiceCred">登录 DeepSeek</button></div>` : ''}
   </div>`;
 }
 
@@ -1300,7 +1359,7 @@ function renderInspectorBody() {
   }
 
   if (tab === 'rev') {
-    const byRev = new Map(S.tasks.filter(t => t.actual_rev).map(t => [t.actual_rev, t.message]));
+    const byRev = new Map(S.tasks.filter(t => t.actual_rev && t.actual_rev !== t.base_rev).map(t => [t.actual_rev, t.message]));
     box.innerHTML = S.revisions.length ? S.revisions.map((r, i) => `<div class="kv-row">
       <div style="min-width:0;flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">
         <b class="num">v${r.rev}</b> · ${esc(byRev.get(r.rev) ?? (r.rev === 1 ? '初始版本' : '手动修改'))}
@@ -1341,15 +1400,21 @@ function appHtml() {
           <div id="timelineMount">${renderTimelineHtml()}</div>
           <div id="stream"></div>
           <form data-form="change" class="composer">
-            <textarea id="prompt" rows="2" aria-label="告诉 AI 想怎么改这个应用" placeholder="${busy ? 'AI 正在制作中...' : '想怎么改？比如「把字放大」「多加一页统计」「改一下配色层次」...'}" ${busy ? 'disabled' : ''}></textarea>
+            <textarea id="prompt" rows="2" aria-label="向 AI 提问或描述想怎么改这个应用" placeholder="${busy ? 'AI 正在回复中...' : '直接提问了解用法，或说想怎么改，比如「你可以干什么？」「把字放大」「多加一页统计」...'}" ${busy ? 'disabled' : ''}></textarea>
             <div class="composer-foot">
-              <span class="small">${S.config?.model?.status === 'CONFIGURED' ? 'Cmd/Ctrl + Enter 发送' : '请先配置 AI 模型'}</span>
+              <span class="small" style="display:inline-flex;align-items:center;gap:8px;flex-wrap:wrap">
+                ${S.aiCred?.configured
+                  ? `<span class="dot on"></span>个人 · ${esc(S.aiCred.model || 'deepseek-flash')}<button type="button" class="link under" data-act="voiceCred">切换模型</button>`
+                  : S.config?.model?.status === 'CONFIGURED'
+                    ? `<span class="dot warn"></span>限量公益通道<button type="button" class="link under" data-act="voiceCred">登录个人账号</button>`
+                    : `<span class="dot warn"></span><button type="button" class="link under" data-act="voiceCred">请先登录 DeepSeek</button>`}
+              </span>
               ${busy
                 ? `<button type="button" class="btn sm" data-act="cancel"${S.cancelling ? ' disabled' : ''}>${S.cancelling ? '正在停止...' : '停止'}</button>`
                 : '<button class="btn sm solid">发送</button>'}
             </div>
           </form>
-          ${!busy ? `<div class="prompt-chips">${chips.map(c => `<button type="button" class="chip" data-act="hint" data-prompt="${esc(c.prompt)}">${esc(c.label)}</button>`).join('')}</div>` : ''}
+          ${!busy ? `<div class="prompt-chips">${chips.map(c => `<button type="button" class="chip" data-act="hint" data-prompt="${esc(c.prompt)}"${c.voiceComp ? ' data-voice-comp="1"' : ''}>${esc(c.label)}</button>`).join('')}</div>` : ''}
         </section>
       </div>
 
@@ -1361,17 +1426,24 @@ function appHtml() {
           <div class="hw-bar">
             <span id="simLed" class="sim-led" data-mode="off" title="状态灯：待机熄灭"></span>
             <button type="button" class="hw-key" data-key="up">上</button>
-            <button type="button" class="hw-key" data-key="ok">确定</button>
+            <button type="button" class="hw-key hw-ok" id="hwOkBtn" data-hw-ok="1" title="${j.voice?.mode && j.voice.mode !== 'off' ? '单击确认 · 按住说话 · 双击免提长录' : '确认键'}"><span class="hw-ok-lbl">确定</span><span class="hw-ok-fill"></span></button>
             <button type="button" class="hw-key" data-key="down">下</button>
             ${j.wave ? '<button type="button" class="hw-key" data-key="wave">挥手</button>' : ''}
             <span class="spacer"></span>
             <button type="button" class="hw-restart" data-act="restart">重置</button>
           </div>
-          ${j.voice && j.voice.mode && j.voice.mode !== 'off' ? `<form class="voice-sim-bar" id="voiceSimForm">
-            <button type="button" class="btn sm soft" data-act="voiceMic" title="浏览器麦克风语音输入">说一句</button>
-            <input id="voiceSimInput" type="text" placeholder="模拟对墨水屏说话（如：帮我记明天三点评审）…" autocomplete="off">
+          ${j.voice && j.voice.mode && j.voice.mode !== 'off' ? `<div class="hw-voice-strip" id="hwVoiceStrip" data-state="idle">
+            <span class="hw-voice-left">
+              <span class="mic-bars" hidden><i></i><i></i><i></i><i></i><i></i></span>
+              <span class="hw-voice-txt">${esc(simHwVoice.idleHint(j.voice.mode))}</span>
+            </span>
+            <button type="button" class="hw-voice-btn" data-act="hwVoiceCancel" hidden>取消</button>
+            <button type="button" class="hw-voice-btn" data-act="toggleSimText">${S.simTextOpen ? '收起打字' : '打字模拟'}</button>
+          </div>
+          ${S.simTextOpen ? `<form class="voice-sim-bar" id="voiceSimForm">
+            <input id="voiceSimInput" type="text" placeholder="没开麦时可在此打字模拟语音指令…" autocomplete="off">
             <button type="submit" class="btn sm solid">发送</button>
-          </form>` : ''}
+          </form>` : ''}` : ''}
         </div>
 
         <div class="err-box" id="errBox" hidden>
@@ -1390,6 +1462,12 @@ function appHtml() {
                 </div>
               </div>
               <div class="setting-row">
+                <span>文字字体</span>
+                <div class="seg">
+                  ${[['auto', '跟随设计'], ['sans', '现代黑体'], ['serif', '书卷宋体'], ['pixel', '经典像素']].map(([v, t]) => `<button type="button" data-act="appFont" data-v="${v}" aria-pressed="${(j.font || 'auto') === v}">${t}</button>`).join('')}
+                </div>
+              </div>
+              <div class="setting-row">
                 <span>隔空挥手</span>
                 <div class="seg">
                   <button type="button" data-act="wave" data-v="1" aria-pressed="${!!j.wave}">开启</button>
@@ -1397,9 +1475,12 @@ function appHtml() {
                 </div>
               </div>
               <div class="setting-row">
-                <span>语音录音键</span>
-                <div class="seg">
-                  ${[['off', '关'], ['ptt', '按住短录'], ['long', '锁存长录'], ['both', '短长双模']].map(([v, t]) => `<button type="button" data-act="voiceMode" data-v="${v}" aria-pressed="${(j.voice?.mode || 'off') === v}">${t}</button>`).join('')}
+                <span>语音+Agent组件</span>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap">
+                  <div class="seg">
+                    ${[['off', '关'], ['ptt', '按住短录'], ['long', '锁存长录'], ['both', '短长双模']].map(([v, t]) => `<button type="button" data-act="voiceMode" data-v="${v}" aria-pressed="${(j.voice?.mode || 'off') === v}">${t}</button>`).join('')}
+                  </div>
+                  ${!(/\b(?:voice|agent\.config)\s*\(/.test(stripKit(j.source))) ? `<button type="button" class="btn sm soft" data-act="agentWireVoice">AI 生成工具</button>` : ''}
                 </div>
               </div>
               ${j.voice?.mode && j.voice.mode !== 'off' ? `<div class="setting-row">
@@ -1530,7 +1611,9 @@ const ACTS = {
   hint: b => {
     const p = $('#prompt');
     if (!p) return;
+    if (b.dataset.voiceComp === '1') S.wantVoiceComp = true;
     p.value = b.dataset.prompt || b.textContent;
+    autoGrowPrompt(p);
     p.focus();
   },
 
@@ -1641,10 +1724,12 @@ const ACTS = {
 
   new: async () => {
     stopFollow();
+    interruptSimulatorVoice();
     S.view = 'home';
     S.work = null;
     S.relay = null;
     S.pendingMsg = '';
+    S.simTextOpen = false;
     location.hash = '';
     render();
     await loadWorks();
@@ -1712,7 +1797,7 @@ const ACTS = {
     await ask(`请修复当前应用在预览引擎中的报错或越界问题：${S.error}`);
   },
 
-  restart: () => { run(false); tell('已重置并从头运行'); },
+  restart: () => { interruptSimulatorVoice(); run(false); tell('已重置并从头运行'); },
   refresh: async b => {
     const mode = b.dataset.v;
     await save(s => { s.js.refresh = mode; });
@@ -1724,6 +1809,14 @@ const ACTS = {
       void cv?.offsetWidth;
       cv?.classList.add('ink-flash');
     }
+  },
+  appFont: async b => {
+    const v = b.dataset.v || 'auto';
+    await save(s => { if (v === 'auto') delete s.js.font; else s.js.font = v; });
+    render();
+    await run(true);
+    paint();
+    tell(v === 'auto' ? '已恢复应用默认字体' : '已切换字体并在预览屏生效');
   },
   wave: async b => {
     await save(s => { s.js.wave = !!b.dataset.v; });
@@ -1745,9 +1838,32 @@ const ACTS = {
     render();
     paint();
   },
+  toggleVoiceComp: () => {
+    S.wantVoiceComp = !S.wantVoiceComp;
+    render();
+    $('#prompt')?.focus();
+  },
+  agentWireVoice: async () => {
+    await ask('帮我给当前应用接入语音和 Agent 助手，保持现有界面与按键挥手交互不变，支持按住确认键说话操控', {voiceComp: true});
+  },
+  hwVoiceCancel: () => simHwVoice.cancelVoice(),
+  toggleSimText: () => {
+    S.simTextOpen = !S.simTextOpen;
+    render();
+    paint();
+    if (S.simTextOpen) $('#voiceSimInput')?.focus();
+  },
   voiceCred: () => openVoiceCredDialog({
     api, dialog, tell, usb,
-    onUpdated: async () => { S.aiCred = await api('/ai-cred/status').catch(() => null); renderTopbar(); }
+    onUpdated: async () => {
+      S.aiCred = readLocalVoiceCred();
+      render();
+      const pendingPrompt = S.aiCred?.configured ? recall('pendingPrompt') : null;
+      if (pendingPrompt) {
+        remember('pendingPrompt', null);
+        await create(pendingPrompt);
+      }
+    }
   }),
   voiceMic: () => {
     const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -1757,7 +1873,7 @@ const ACTS = {
     rec.onresult = ev => {
       const txt = ev.results?.[0]?.[0]?.transcript || '';
       if ($('#voiceSimInput')) $('#voiceSimInput').value = txt;
-      if (txt) runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb});
+      if (txt) runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb, onRevoked: () => { S.aiCred = null; render(); }});
       else setSimLed('off');
     };
     rec.onerror = () => setSimLed('off');
@@ -1787,6 +1903,7 @@ const ACTS = {
 };
 
 document.addEventListener('click', e => {
+  if (e.detail === 0 && e.target.closest('[data-hw-ok]')) return press('ok');
   const key = e.target.closest('[data-key]');
   if (key) return press(key.dataset.key);
   const b = e.target.closest('[data-act]');
@@ -1803,12 +1920,27 @@ document.addEventListener('toggle', e => {
   }
 }, true);
 
+document.addEventListener('pointerdown', e => {
+  const ok = e.target.closest('[data-hw-ok]');
+  if (ok) {
+    e.preventDefault();
+    simHwVoice.onOkDown(e);
+  }
+});
+document.addEventListener('pointerup', () => simHwVoice.onOkUp());
+document.addEventListener('pointercancel', () => simHwVoice.onOkCancel());
+window.addEventListener('blur', () => {
+  kbEnterDown = false;
+  simHwVoice.onOkCancel();
+});
+
 document.addEventListener('input', e => {
   if (e.target.id === 'tplSearch') {
     S.search = e.target.value;
     const mount = $('#galleryMount');
     if (mount) mount.innerHTML = renderGalleryCards();
   }
+  if (e.target.id === 'prompt') autoGrowPrompt(e.target);
 });
 
 document.addEventListener('submit', e => {
@@ -1861,9 +1993,20 @@ document.addEventListener('submit', e => {
     });
   }
 
-  const text = $('#prompt')?.value.trim();
+  if (e.target.id === 'voiceSimForm') {
+    const inp = $('#voiceSimInput'), txt = inp?.value.trim() || '';
+    if (!txt) return;
+    inp.value = '';
+    runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb, onRevoked: () => { S.aiCred = null; render(); }, idleLabel: simHwVoice.idleHint(S.work?.spec?.js?.voice?.mode || 'both')});
+    return;
+  }
+
+  if (f !== 'new' && f !== 'change') return;
+  const pEl = $('#prompt');
+  const text = pEl?.value.trim();
   if (!text) return;
-  $('#prompt').value = '';
+  pEl.value = '';
+  autoGrowPrompt(pEl);
   act(f === 'new' ? 'nav' : 'ask', e.submitter, () => f === 'new' ? create(text) : ask(text));
 });
 
@@ -1872,6 +2015,7 @@ document.addEventListener('change', e => {
   guard(() => save(s => { s.title = e.target.value.trim(); }));
 });
 
+let kbEnterDown = false;
 document.addEventListener('keydown', e => {
   if ((e.metaKey || e.ctrlKey) && e.key === 'Enter' && e.target.id === 'prompt') {
     e.preventDefault();
@@ -1879,10 +2023,24 @@ document.addEventListener('keydown', e => {
     return;
   }
   if ($('#dialog')?.open || e.target.matches('input,textarea,select') || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === 'Enter' && S.view === 'app' && !e.target.closest('button')) {
+    e.preventDefault();
+    if (!e.repeat && !kbEnterDown) {
+      kbEnterDown = true;
+      simHwVoice.onOkDown();
+    }
+    return;
+  }
   const k = {ArrowUp: 'up', ArrowDown: 'down', Enter: 'ok', w: 'wave', W: 'wave'}[e.key];
   if (k && !e.target.closest('button')) {
     e.preventDefault();
     press(k);
+  }
+});
+document.addEventListener('keyup', e => {
+  if (e.key === 'Enter' && kbEnterDown) {
+    kbEnterDown = false;
+    simHwVoice.onOkUp();
   }
 });
 
@@ -1901,27 +2059,36 @@ function loginPage() {
   $('#root').innerHTML = `<main class="lg"><section class="lg-copy"><strong class="brand-btn"><span class="brand-mark">N4</span>NOTE4 创作台</strong><div class="lg-mid"><div class="lg-num num"><b>64</b><i>KB</i><span>装下一整块桌面墨水屏</span></div><h1>说一句话，给墨水屏做个小应用。</h1><p>番茄钟、天气看板、电脑定时同步桌贴。网页里先试玩，发布后断网也能常显。</p>${q ? `<p class="err">${esc(q)}</p>` : ''}<div class="lg-go"><a class="btn solid" href="/api/auth/sso">微信登录</a><button class="btn" data-act="demo">1 分钟演示</button></div></div></section><figure class="lg-art">${inkArt()}</figure></main>`;
 }
 
-let lastFocusSync = 0;
+let lastFocusSync = 0, lastCredCheck = 0;
+function checkVoiceCredLiveness(isBoot = false) {
+  if (!S.aiCred?.configured) return;
+  const minGap = isBoot ? 60000 : 180000;
+  const now = Date.now();
+  if (!isBoot && now - lastCredCheck < minGap) return;
+  lastCredCheck = now;
+  verifyLocalVoiceCred({
+    api, usb, tell, minAgeMs: minGap,
+    onRevoked: () => { S.aiCred = null; render(); },
+  }).then(r => {
+    if (r?.valid && r.cred) S.aiCred = r.cred;
+  }).catch(() => {});
+}
+
 window.addEventListener('focus', () => {
+  checkVoiceCredLiveness(false);
   if (!S.user || S.config?.dev_mode) return;
   if (Date.now() - lastFocusSync < 30000) return;
   lastFocusSync = Date.now();
   loadDevices().then(renderTopbar).catch(() => {});
 });
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) checkVoiceCredLiveness(false);
+});
 
 async function boot() {
   S.config = await api('/config');
   S.user = (await api('/auth/me')).user;
-  S.aiCred = await api('/ai-cred/status').catch(() => null);
-  document.addEventListener('submit', e => {
-    if (e.target?.id === 'voiceSimForm') {
-      e.preventDefault();
-      const inp = $('#voiceSimInput'), txt = inp?.value.trim() || '';
-      if (!txt) return;
-      inp.value = '';
-      runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb});
-    }
-  });
+  S.aiCred = readLocalVoiceCred();
   await loadWorks();
   await loadDevices().catch(() => {});
   const active = (await api('/ai/tasks')).tasks.find(t => ACTIVE.includes(t.state));
@@ -1929,6 +2096,7 @@ async function boot() {
   if (id && S.works.some(w => w.id === id && w.spec.kind === 'js')) await openWork(id);
   else render();
   if (active) follow(active);
+  checkVoiceCredLiveness(true);
 }
 
 boot().catch(e => {
