@@ -140,7 +140,7 @@ const uid=auth.id;this.accounts.rate('api:'+uid,LIMITS.request_per_minute);this.
  case'check_work':return this.checkWork(auth.id,a.work_id,a.base_rev,auth.works,a.mock_net);
  case'build_work':return this.build(auth.id,a.work_id,a.base_rev,auth.works);
  case'draft_service':if(auth.works)fail('No service permission',403);return this.hosted.draft(auth.id,{...a.spec,work_id:auth.task_work_id??a.spec.work_id},undefined,undefined);
- case'update_service':{const service=this.hosted.get(auth.id,a.service_id);if(auth.task_work_id&&service.spec.work_id!==auth.task_work_id)fail('Task service scope',403);return this.hosted.draft(auth.id,{...a.spec,work_id:service.spec.work_id},service.id,a.base_rev);}
+ case'update_service':{const service=this.hosted.get(auth.id,a.service_id);this.work(auth.id,service.spec.work_id,auth.works);if(auth.task_work_id&&service.spec.work_id!==auth.task_work_id)fail('Task service scope',403);return this.hosted.draft(auth.id,{...a.spec,work_id:service.spec.work_id},service.id,a.base_rev);}
  case'get_service':{const service=this.hosted.get(auth.id,a.service_id);this.work(auth.id,service.spec.work_id,auth.works);return service;}
  case'check_service':{const service=this.hosted.get(auth.id,a.service_id);this.work(auth.id,service.spec.work_id,auth.works);return this.hosted.check(auth.id,a.service_id,a.base_rev,signal);}
  default:fail('Unknown tool');}}
