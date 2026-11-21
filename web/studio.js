@@ -1724,6 +1724,7 @@ const ACTS = {
 
   new: async () => {
     stopFollow();
+    S.task = null;
     interruptSimulatorVoice();
     S.view = 'home';
     S.work = null;
