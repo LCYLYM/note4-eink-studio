@@ -205,12 +205,12 @@ static void report_error(const char *where) {
     printf("NOTE4 JS_ERROR %s: ", where); JS_PrintValueF(ctx, e, JS_DUMP_LONG); printf("\n");
 }
 static void call(const char *name, const char *arg) {
-    JSValue g = JS_GetGlobalObject(ctx), f = JS_GetPropertyStr(ctx, g, name);
-    if (JS_IsUndefined(f)) return;
+    if (JS_IsUndefined(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), name))) return;
     if (JS_StackCheck(ctx, 3)) { report_error(name); return; }
     int n = 0;
     if (arg) { JS_PushArg(ctx, JS_NewString(ctx, arg)); n = 1; }
-    JS_PushArg(ctx, f); JS_PushArg(ctx, JS_NULL);
+    // Look the handler up only after the pushes: StackCheck/NewString can run a compacting GC that moves it.
+    JS_PushArg(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), name)); JS_PushArg(ctx, JS_NULL);
     int64_t t0 = esp_timer_get_time(); deadline = t0 + HANDLER_US;
     user_call = !strcmp(name, "on_key") || !strcmp(name, "on_start");
     JSValue r = JS_Call(ctx, n);
