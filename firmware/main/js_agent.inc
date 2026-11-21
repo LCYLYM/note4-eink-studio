@@ -80,13 +80,16 @@ static const char kAgNormalizeJs[] =
 static JSValue js_agent_config(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     argc &= ~FRAME_CF_CTOR;
     if (argc < 1) return JS_ThrowTypeError(c, "agent.config(spec) requires 1 argument");
-    JSGCRef arg_ref; JS_PushGCRef(c, &arg_ref); arg_ref.val = argv[0];
-    JSValue fn = JS_Eval(c, kAgNormalizeJs, sizeof(kAgNormalizeJs) - 1, "<agent>", JS_EVAL_RETVAL);
-    JSValue spec_val = JS_PopGCRef(c, &arg_ref);
-    if (JS_IsException(fn)) return JS_EXCEPTION;
-    if (JS_StackCheck(c, 3)) return JS_EXCEPTION;
-    JS_PushArg(c, spec_val);
-    JS_PushArg(c, fn);
+    // Both values stay GC-rooted until pushed: JS_StackCheck can run a compacting GC that moves them.
+    JSGCRef arg_ref, fn_ref;
+    JS_PushGCRef(c, &arg_ref); arg_ref.val = argv[0];
+    JS_PushGCRef(c, &fn_ref);
+    fn_ref.val = JS_Eval(c, kAgNormalizeJs, sizeof(kAgNormalizeJs) - 1, "<agent>", JS_EVAL_RETVAL);
+    bool ok = !JS_IsException(fn_ref.val) && !JS_StackCheck(c, 3);
+    if (ok) { JS_PushArg(c, arg_ref.val); JS_PushArg(c, fn_ref.val); }
+    JS_PopGCRef(c, &fn_ref);
+    JS_PopGCRef(c, &arg_ref);
+    if (!ok) return JS_EXCEPTION;
     JS_PushArg(c, JS_NULL);
     JSValue res = JS_Call(c, 1);
     if (JS_IsException(res)) return JS_EXCEPTION;
