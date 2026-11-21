@@ -352,12 +352,12 @@ EMSCRIPTEN_KEEPALIVE void vm_store_clear(void) { for (int i = 0; i < nstore; i++
 EMSCRIPTEN_KEEPALIVE void vm_store_put(const char *k, const char *v, size_t n) { if (nstore == STORE_MAX) return; entry_t *e = &store[nstore++]; snprintf(e->key, sizeof e->key, "%s", k); e->data = malloc(n ? n : 1); memcpy(e->data, v, n); e->len = n; store_used += n; }
 
 static int call(const char *name, const char *arg) {
-    JSValue g = JS_GetGlobalObject(ctx), f = JS_GetPropertyStr(ctx, g, name);
-    if (JS_IsUndefined(f)) return 0;
+    if (JS_IsUndefined(JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), name))) return 0;
     if (JS_StackCheck(ctx, 3)) { report_error(); return -1; }
     int n = 0;
     if (arg) { JS_PushArg(ctx, JS_NewString(ctx, arg)); n = 1; }
-    JS_PushArg(ctx, f); JS_PushArg(ctx, JS_NULL);
+    // Look the handler up only after the pushes: StackCheck/NewString can run a compacting GC that moves it.
+    JS_PushArg(ctx, JS_GetPropertyStr(ctx, JS_GetGlobalObject(ctx), name)); JS_PushArg(ctx, JS_NULL);
     ticks = 0;
     JSValue r = JS_Call(ctx, n);
     if (JS_IsException(r)) { report_error(); return -1; }
