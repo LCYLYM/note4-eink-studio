@@ -229,7 +229,7 @@ function usesRelayCode(src) {
 async function engine() {
   if (vm) return vm;
   const [w, f, af] = await Promise.all([
-    fetch('vendor/note4_vm.wasm?v=27'),
+    fetch('vendor/note4_vm.wasm?v=28'),
     fetch('vendor/font16.bin'),
     fetch('vendor/fonts_aa.bin?v=30').catch(() => null),
   ]);
@@ -1319,9 +1319,11 @@ function renderStream() {
   const tok = tokFmt(t.tokens);
 
   if (!isCodeWork) {
+    const bCls = done ? 'done' : active ? 'now' : '';
+    const bLbl = done ? '已回复' : active ? 'AI 回复中' : t.state === 'cancelled' ? '已停止' : t.state === 'paused' ? '已暂停' : '未完成';
     el.innerHTML = `<div class="stream-card ${['failed', 'unconfigured'].includes(t.state) ? 'err-card' : ''}">
       <div class="phases">
-        <span class="${done ? 'done' : 'now'}"><span class="dot"></span>${done ? '已回复' : 'AI 回复中'}</span>
+        <span class="${bCls}"><span class="dot"></span>${bLbl}</span>
         <span class="timer num" id="taskTimer">${sec}s</span>
         ${tok ? `<span class="small num">${esc(tok)}</span>` : ''}
       </div>
