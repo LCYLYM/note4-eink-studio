@@ -162,10 +162,10 @@ const PROMO_POSTER_RAW = 'https://raw.githubusercontent.com/LCYLYM/note4-eink-st
 const PROMO_POSTER_CDN = 'https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@main/docs/screenshots/note4-promo-poster.jpg';
 
 function promoVideoPlayerHtml(autoplay = true) {
-  return `<video class="film-video" controls ${autoplay ? 'autoplay' : ''} playsinline preload="metadata" poster="${PROMO_POSTER_RAW}">
-    <source src="${PROMO_VIDEO_RAW}" type="video/mp4">
+  return `<video class="film-video" controls ${autoplay ? 'autoplay' : ''} playsinline preload="metadata" poster="${PROMO_POSTER_CDN}">
     <source src="${PROMO_VIDEO_CDN}" type="video/mp4">
-    当前浏览器不支持内嵌播放，<a href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">点此打开 GitHub 视频直链</a>。
+    <source src="${PROMO_VIDEO_RAW}" type="video/mp4">
+    当前浏览器不支持内嵌播放，<a href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">点此打开 GitHub 视频直链</a>。
   </video>`;
 }
 
@@ -183,7 +183,7 @@ function openPromoVideoDialog() {
   <div class="cinema-stage">${promoVideoPlayerHtml(true)}</div>
   <div class="cinema-foot">
     <span class="cinema-note">对话生成 · Finish Gate 零越界核验 · 16 灰液态玻璃 · 端侧按住说话闭环</span>
-    <a class="cinema-ext" href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">GitHub 原片直链 ↗</a>
+    <a class="cinema-ext" href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">GitHub 直链播放 ↗</a>
   </div>`;
   if (!d.open) d.showModal();
 }
@@ -1199,12 +1199,12 @@ function homeHtml() {
         <div class="film-acts">
           <button type="button" class="btn sm solid" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>剧场模式播放</button>
           <button type="button" class="btn sm soft" data-act="playInlineFilm">原位播放</button>
-          <a class="link under" href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">GitHub 原片直链</a>
+          <a class="link under" href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">GitHub 直链</a>
         </div>
       </div>
       <div class="film-stage" id="homeFilmStage">
         <button type="button" class="film-poster-btn" data-act="playInlineFilm" aria-label="播放 46 秒实机演示有声短片">
-          <img src="${PROMO_POSTER_RAW}" data-fallback="${PROMO_POSTER_CDN}" alt="NOTE4 46 秒实机演示封面" loading="lazy" width="960" height="540">
+          <img src="${PROMO_POSTER_CDN}" data-fallback="${PROMO_POSTER_RAW}" alt="NOTE4 46 秒实机演示封面" loading="lazy" width="960" height="540">
           <span class="film-shade" aria-hidden="true"></span>
           <span class="film-play-pill" aria-hidden="true"><span class="play-tri"></span><span>播放有声正片 · 00:46</span></span>
         </button>

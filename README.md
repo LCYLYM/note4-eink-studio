@@ -33,11 +33,11 @@
 ## 效果展示
 
 <p align="center">
-  <a href="https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4">
+  <a href="https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@main/docs/video/note4-promo.mp4">
     <img src="docs/screenshots/note4-promo.gif" alt="NOTE4 端侧语音与对话创作实机演示动图" width="100%">
   </a>
   <br>
-  <sub><b>46 秒完整实机与工作台演示</b> · 点击动图打开 1080p 有声正片（<a href="https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4">GitHub 视频直链</a> ｜ <a href="docs/video/note4-promo.mp4">仓库文件</a>）</sub>
+  <sub><b>46 秒完整实机与工作台演示</b> · 点击动图在线播放 1080p 有声正片（<a href="https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4">GitHub Raw 直链</a> ｜ <a href="docs/video/note4-promo.mp4">仓库文件</a>）</sub>
 </p>
 
 <p align="center">
