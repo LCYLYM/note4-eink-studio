@@ -166,7 +166,7 @@ async function fetchDshBalance(platform: any, dshToken: string): Promise<string 
 
 export function readCallerBrowserCred(r: Request, allowLocalHttp = false) {
   const token = String(r.headers.get('x-n4-ai-token') || '').trim();
-  if (!token || token.length < 6 || token.length > 512) return null;
+  if (!token || token.length < 6 || token.length > 2048 || /[^\x20-\x7e]/.test(token)) return null;
   const kind: 'dsh_token' | 'api_key' = r.headers.get('x-n4-ai-kind') === 'api_key' ? 'api_key' : 'dsh_token';
   // For DSH official login, base_url is strictly locked to https://api.deepseek.com; custom api_key base_url is SSRF-validated!
   const base_url = kind === 'dsh_token'
@@ -435,7 +435,7 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     const key = String(b.api_key || '').trim();
     const baseUrl = sanitizeUserBaseUrl(b.base_url, devLocal);
     const model = String(b.model || 'deepseek-flash').trim() || 'deepseek-flash';
-    if (key.length < 8 || key.length > 512 || !baseUrl) {
+    if (key.length < 8 || key.length > 2048 || /[^\x20-\x7e]/.test(key) || !baseUrl) {
       throw Object.assign(Error('请填写有效的 API Key 与公网 https:// 接口地址'), {status: 400});
     }
     const mRes = await extFetch(platform, buildV1(baseUrl, '/models'), {
