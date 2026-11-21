@@ -191,6 +191,7 @@ async function consumeSSE(
       for (const l of buf.split('\n')) processLine(l);
     }
   } finally {
+    reader.cancel().catch(() => {});
     reader.releaseLock();
   }
 
