@@ -26,6 +26,8 @@ public:
     void Shutdown();
     int Read(int16_t* samples, size_t count);
     int Write(const int16_t* samples, size_t count);
+    esp_err_t SetOutputVolume(int vol);
+    esp_err_t SetInputGain(float db);
     uint32_t Overruns() const;
     bool initialized() const { return codec_if_ != nullptr; }
 

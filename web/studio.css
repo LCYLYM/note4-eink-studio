@@ -1050,3 +1050,20 @@ body.nav .tpl-card, body.nav .work-card { pointer-events: none; }
     transition-duration: 0.01ms !important;
   }
 }
+
+/* v2.0 Voice Status LED & Simulator Bar */
+.sim-led { display: inline-block; width: 10px; height: 10px; border-radius: 50%; background: #c8c5bc; border: 1px solid rgba(0,0,0,.18); transition: background .18s, box-shadow .18s; flex-shrink: 0; }
+.sim-led[data-mode="ptt"] { background: #30b858; box-shadow: 0 0 6px rgba(48,184,88,.65); }
+.sim-led[data-mode="long"] { background: #16d650; box-shadow: 0 0 10px rgba(22,214,80,.95); }
+.sim-led[data-mode="breathe"] { background: #26c456; animation: n4LedBreathe 1.6s ease-in-out infinite; }
+.sim-led[data-mode="speaking"] { background: #2bd060; animation: n4LedBreathe 0.9s ease-in-out infinite; }
+.sim-led[data-mode="err"] { background: #1fd154; animation: n4LedErr 0.16s steps(2) 6; }
+@keyframes n4LedBreathe { 0%, 100% { opacity: .22; box-shadow: 0 0 2px rgba(38,196,86,.2); } 50% { opacity: 1; box-shadow: 0 0 11px rgba(38,196,86,.95); } }
+@keyframes n4LedErr { 0% { opacity: 1; } 50% { opacity: .1; } 100% { opacity: 1; } }
+
+.voice-sim-bar { display: flex; gap: 6px; align-items: center; margin-top: 8px; padding: 6px 8px; border-radius: 10px; background: rgba(0,0,0,.035); border: 1px solid rgba(0,0,0,.08); }
+.voice-sim-bar input { flex: 1; min-width: 0; border: 0; background: transparent; font-size: 13px; outline: none; padding: 4px 6px; }
+.vcred-badge { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; padding: 10px 12px; border-radius: 10px; background: rgba(0,0,0,.04); border: 1px solid rgba(0,0,0,.08); font-size: 13px; }
+.vcred-badge.ok { background: rgba(32,168,76,.08); border-color: rgba(32,168,76,.28); }
+.vcred-card { padding: 12px 14px; border-radius: 10px; border: 1px solid rgba(0,0,0,.1); background: #fff; }
+.vcred-card input { width: 100%; box-sizing: border-box; padding: 8px 10px; border-radius: 8px; border: 1px solid rgba(0,0,0,.16); font-size: 13px; }

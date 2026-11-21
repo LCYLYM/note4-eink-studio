@@ -177,6 +177,38 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
     }
   }
 
+  // 3. Declarative Voice Agent (agent.config) tool-probe & Finish Gate verification
+  let agentToolsProbed = 0;
+  let agentRole = '';
+  timed(() => v.start(spec.js.source, {}, mode, frames), 'on_start(agent_probe)', true);
+  v.dirty();
+  const agInfo = (v as any).agent?.() ?? {configured: false, toolCount: 0, role: '', tools: []};
+  if (spec.js.voice && spec.js.voice.mode && spec.js.voice.mode !== 'off' && !agInfo.configured) {
+    throw Error(
+      'js.voice 已开启语音模式，但源码未在 on_start() 中调用 agent.config({ role, state, tools, on_event }) 注册端侧语音智能体！'
+    );
+  }
+  if (agInfo.configured) {
+    agentRole = agInfo.role;
+    timed(() => ((v as any).agentState().ok ? 0 : -1), 'agent.state()');
+    timed(() => (v as any).agentEmit('listening', '请说话…'), 'agent.on_event(listening)');
+    if (v.dirty()) mergeLayout('agent:listening');
+    for (let i = 0; i < agInfo.toolCount; i++) {
+      const tname = agInfo.tools[i]?.function?.name ?? `tool_${i}`;
+      timed(() => ((v as any).agentProbe(i).ok ? 0 : -1), `agent.tool('${tname}')`);
+      agentToolsProbed++;
+      if (v.dirty()) mergeLayout(`agent:${tname}`);
+      const aOff = v.oob();
+      if (aOff.count) {
+        throw Error(
+          `Voice tool '${tname}' drew outside 400x300 (near x=${aOff.x}, y=${aOff.y}, ${aOff.count} off-screen pixels). Clip dynamic text and fit inside 0..399 x 0..299.`
+        );
+      }
+    }
+    timed(() => (v as any).agentEmit('done', '已为你更新看板。'), 'agent.on_event(done)');
+    if (v.dirty()) mergeLayout('agent:done');
+  }
+
   const srcStr = String(spec.js.source ?? '');
   if (layoutErrors.length > 0 && /ui\.font\(['"](?:sans|serif|display|display_lg)['"]\)[\s\S]{0,160}ui\.text\([^;\n]+,\s*[234]\s*,/.test(srcStr)) {
     layoutErrors.push('排查提示：检测到在 AA 抗锯齿字体（sans/serif/display/display_lg）下给 ui.text 传了 scale>=2！AA 字体自带 20/24/36/48px 原生高度，传 scale=2/3 会变成 72–144px 巨字直接重叠并穿出卡片；请把所有 AA 字体的 ui.text(..., scale, ...) 全部改为 scale=1（要更大字直接切 display 或 display_lg，不要改 scale）！');
@@ -190,6 +222,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
     keys: responses,
     net_requests_tested_offline: dropped,
     mock_net_tested: mockTested,
+    ...(agInfo.configured ? {agent_configured: true, agent_role: agentRole, agent_tools_probed: agentToolsProbed} : {}),
     oob_pixels: 0,
     finish_gate_passed: layoutErrors.length === 0,
     ...(layoutErrors.length ? {layout_errors: layoutErrors} : {}),

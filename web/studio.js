@@ -1,7 +1,8 @@
 // NOTE4 Studio v2.3: Minimalist Paper-Style E-Ink Co-Pilot, Streaming Harness & AI Push-Doc Relay.
-import {Note4Vm} from './vm.js?v=24';
+import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed} from './voice-ui.js?v=27';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -211,7 +212,7 @@ function usesRelayCode(src) {
 async function engine() {
   if (vm) return vm;
   const [w, f, af] = await Promise.all([
-    fetch('vendor/note4_vm.wasm?v=26'),
+    fetch('vendor/note4_vm.wasm?v=27'),
     fetch('vendor/font16.bin'),
     fetch('vendor/fonts_aa.bin?v=24').catch(() => null),
   ]);
@@ -986,11 +987,16 @@ function topbarHtml() {
   const modelBtn = S.user?.role === 'admin'
     ? `<button class="pill-btn" data-act="modelCfg"><span class="dot ${modelOk ? 'on' : 'warn'}"></span>${modelOk ? 'AI 已就绪' : '配置 AI'}</button>`
     : '';
+  const voiceOk = !!S.aiCred?.configured;
+  const voiceBtn = S.user
+    ? `<button class="pill-btn" data-act="voiceCred"><span class="dot ${voiceOk ? 'on' : ''}"></span>${voiceOk ? '语音已绑定' : '语音登录'}</button>`
+    : '';
   return `<header class="topbar" id="topbar">
     <button type="button" class="brand-btn" data-act="home"><span class="brand-mark">N4</span><span>NOTE4 创作台</span></button>
     <div class="top-end">
       ${S.view === 'app' ? `<button type="button" class="link under" data-act="home">返回首页</button>` : ''}
       <button type="button" class="link" data-act="demo">1 分钟演示</button>
+      ${voiceBtn}
       ${modelBtn}
       ${devBtn}
       ${S.user && !S.config?.dev_mode ? '<button type="button" class="link" data-act="logout">退出</button>' : ''}
@@ -1353,6 +1359,7 @@ function appHtml() {
             <canvas id="screen" class="eink" width="400" height="300" aria-label="设备实时预览"></canvas>
           </div>
           <div class="hw-bar">
+            <span id="simLed" class="sim-led" data-mode="off" title="状态灯：待机熄灭"></span>
             <button type="button" class="hw-key" data-key="up">上</button>
             <button type="button" class="hw-key" data-key="ok">确定</button>
             <button type="button" class="hw-key" data-key="down">下</button>
@@ -1360,6 +1367,11 @@ function appHtml() {
             <span class="spacer"></span>
             <button type="button" class="hw-restart" data-act="restart">重置</button>
           </div>
+          ${j.voice && j.voice.mode && j.voice.mode !== 'off' ? `<form class="voice-sim-bar" id="voiceSimForm">
+            <button type="button" class="btn sm soft" data-act="voiceMic" title="浏览器麦克风语音输入">说一句</button>
+            <input id="voiceSimInput" type="text" placeholder="模拟对墨水屏说话（如：帮我记明天三点评审）…" autocomplete="off">
+            <button type="submit" class="btn sm solid">发送</button>
+          </form>` : ''}
         </div>
 
         <div class="err-box" id="errBox" hidden>
@@ -1384,6 +1396,18 @@ function appHtml() {
                   <button type="button" data-act="wave" data-v="" aria-pressed="${!j.wave}">关闭</button>
                 </div>
               </div>
+              <div class="setting-row">
+                <span>语音录音键</span>
+                <div class="seg">
+                  ${[['off', '关'], ['ptt', '按住短录'], ['long', '锁存长录'], ['both', '短长双模']].map(([v, t]) => `<button type="button" data-act="voiceMode" data-v="${v}" aria-pressed="${(j.voice?.mode || 'off') === v}">${t}</button>`).join('')}
+                </div>
+              </div>
+              ${j.voice?.mode && j.voice.mode !== 'off' ? `<div class="setting-row">
+                <span>看板播报音色</span>
+                <div class="seg">
+                  ${[['stella', '女声默认'], ['tide', '男声播报'], ['off', '仅提示音']].map(([v, t]) => `<button type="button" data-act="voiceTts" data-v="${v}" aria-pressed="${(j.voice?.tts || 'stella') === v}">${t}</button>`).join('')}
+                </div>
+              </div>` : ''}
               ${j.gallery === 'photo' ? `<div class="setting-row"><span>随机相册图片</span><button type="button" class="btn sm soft" data-act="shuffle">换一批</button></div>` : ''}
               <div class="setting-row">
                 <span>电脑数据推送</span>
@@ -1706,6 +1730,39 @@ const ACTS = {
     render();
     paint();
   },
+  voiceMode: async b => {
+    const mode = b.dataset.v || 'off';
+    await save(s => {
+      s.js.voice = mode === 'off'
+        ? {mode: 'off', long_trigger: 'double_click', tts: 'stella', search: true, thinking: false}
+        : {mode, long_trigger: s.js.voice?.long_trigger || 'double_click', tts: s.js.voice?.tts || 'stella', search: s.js.voice?.search ?? true, thinking: !!s.js.voice?.thinking};
+    });
+    render();
+    paint();
+  },
+  voiceTts: async b => {
+    await save(s => { if (s.js.voice) s.js.voice.tts = b.dataset.v || 'stella'; });
+    render();
+    paint();
+  },
+  voiceCred: () => openVoiceCredDialog({
+    api, dialog, tell, usb,
+    onUpdated: async () => { S.aiCred = await api('/ai-cred/status').catch(() => null); renderTopbar(); }
+  }),
+  voiceMic: () => {
+    const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+    if (!SR) { $('#voiceSimInput')?.focus(); return tell('当前浏览器不支持原生听写，请直接在输入框打字模拟语音'); }
+    const rec = new SR(); rec.lang = 'zh-CN'; rec.interimResults = false;
+    setSimLed('ptt');
+    rec.onresult = ev => {
+      const txt = ev.results?.[0]?.[0]?.transcript || '';
+      if ($('#voiceSimInput')) $('#voiceSimInput').value = txt;
+      if (txt) runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb});
+      else setSimLed('off');
+    };
+    rec.onerror = () => setSimLed('off');
+    rec.start();
+  },
   inspTab: b => {
     S.inspectorTab = b.dataset.tab;
     $$('#inspectorTabs .clip-tab').forEach(t => t.setAttribute('aria-selected', String(t === b)));
@@ -1855,6 +1912,16 @@ window.addEventListener('focus', () => {
 async function boot() {
   S.config = await api('/config');
   S.user = (await api('/auth/me')).user;
+  S.aiCred = await api('/ai-cred/status').catch(() => null);
+  document.addEventListener('submit', e => {
+    if (e.target?.id === 'voiceSimForm') {
+      e.preventDefault();
+      const inp = $('#voiceSimInput'), txt = inp?.value.trim() || '';
+      if (!txt) return;
+      inp.value = '';
+      runSimulatorVoiceTurn({utterance: txt, vm, work: S.work, api, paint, tell, usb});
+    }
+  });
   await loadWorks();
   await loadDevices().catch(() => {});
   const active = (await api('/ai/tasks')).tasks.find(t => ACTIVE.includes(t.state));

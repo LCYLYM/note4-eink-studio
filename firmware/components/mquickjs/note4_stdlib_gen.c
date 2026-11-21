@@ -362,6 +362,14 @@ static const JSPropDef js_store[] = {
 };
 static const JSClassDef js_store_obj = JS_OBJECT_DEF("Store", js_store);
 
+static const JSPropDef js_agent[] = {
+    JS_CFUNC_DEF("config", 1, js_agent_config),
+    JS_CFUNC_DEF("say", 1, js_agent_say),
+    JS_CFUNC_DEF("status", 0, js_agent_status),
+    JS_PROP_END,
+};
+static const JSClassDef js_agent_obj = JS_OBJECT_DEF("Agent", js_agent);
+
 static const JSPropDef js_global_object[] = {
     JS_PROP_CLASS_DEF("Object", &js_object_class),
     JS_PROP_CLASS_DEF("Function", &js_function_class),
@@ -410,6 +418,7 @@ static const JSPropDef js_global_object[] = {
     JS_PROP_CLASS_DEF("ui", &js_ui_obj),
     JS_PROP_CLASS_DEF("store", &js_store_obj),
     JS_PROP_CLASS_DEF("net", &js_net_obj),
+    JS_PROP_CLASS_DEF("agent", &js_agent_obj),
     JS_PROP_CLASS_DEF("performance", &js_performance_obj),
     JS_CFUNC_DEF("print", 1, js_print),
 #ifdef CONFIG_CLASS_EXAMPLE

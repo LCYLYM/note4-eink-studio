@@ -322,6 +322,10 @@ static JSValue js_store_set(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     free(e->data); e->data = malloc(len ? len : 1); memcpy(e->data, s, len); e->len = len; store_used = store_used - old + len;
     return JS_UNDEFINED;
 }
+static void report_error(void);
+#define JS_AGENT_ARM_DEADLINE() (ticks = 0)
+#define JS_AGENT_REPORT_ERR(w) report_error()
+#include "../firmware/main/js_agent.inc"
 #include "note4_stdlib.h"
 
 static void log_write(void *o, const void *b, size_t n) { if (loglen + n >= LOG_MAX) n = LOG_MAX - loglen - 1; memcpy(logbuf + loglen, b, n); loglen += n; logbuf[loglen] = 0; }
@@ -362,7 +366,7 @@ static int call(const char *name, const char *arg) {
 // Returns 0 on success, -1 when the source failed to compile or load, -2 when on_start threw.
 EMSCRIPTEN_KEEPALIVE int vm_start(const char *src, size_t len) {
     if (ctx) { JS_FreeContext(ctx); ctx = NULL; }
-    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; ticks = 0; tick_ms = 0; active_font = 0; layout_reset();
+    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; ticks = 0; tick_ms = 0; active_font = 0; layout_reset(); ag_reset_state();
     ctx = JS_NewContext(mem, JS_HEAP_SIZE, &js_stdlib);
     if (!ctx) return -1;
     JS_SetLogFunc(ctx, log_write);
@@ -386,3 +390,27 @@ EMSCRIPTEN_KEEPALIVE int vm_net(const char *key, int status, const char *body, s
     return 0;
 }
 EMSCRIPTEN_KEEPALIVE int vm_tick(void) { return ctx ? call("on_tick", NULL) : -1; }
+
+static char vm_ag_out[6144];
+EMSCRIPTEN_KEEPALIVE int vm_agent_configured(void) { return ctx && ag_configured ? 1 : 0; }
+EMSCRIPTEN_KEEPALIVE int vm_agent_tool_count(void) { return ag_configured ? ag_tool_count : 0; }
+EMSCRIPTEN_KEEPALIVE const char *vm_agent_role(void) { return ag_role_buf; }
+EMSCRIPTEN_KEEPALIVE const char *vm_agent_tools_json(void) { return ag_tools_schema; }
+EMSCRIPTEN_KEEPALIVE const char *vm_agent_out(void) { return vm_ag_out; }
+EMSCRIPTEN_KEEPALIVE int vm_agent_state(void) {
+    vm_ag_out[0] = 0;
+    return ag_invoke_helper("readState", NULL, NULL, -1, vm_ag_out, sizeof(vm_ag_out)) ? 0 : -1;
+}
+EMSCRIPTEN_KEEPALIVE int vm_agent_probe(int idx) {
+    vm_ag_out[0] = 0;
+    if (idx < 0 || idx >= ag_tool_count) return -1;
+    return ag_invoke_helper("probeIdx", NULL, NULL, idx, vm_ag_out, sizeof(vm_ag_out)) ? 0 : -1;
+}
+EMSCRIPTEN_KEEPALIVE int vm_agent_call(const char *name, const char *args_json) {
+    vm_ag_out[0] = 0;
+    return ag_invoke_helper("callTool", name, args_json ? args_json : "{}", -1, vm_ag_out, sizeof(vm_ag_out)) ? 0 : -1;
+}
+EMSCRIPTEN_KEEPALIVE int vm_agent_emit(const char *phase, const char *text) {
+    ag_utf8_clip(phase ? phase : "idle", phase ? strlen(phase) : 4, ag_status_str, sizeof(ag_status_str));
+    return ag_invoke_helper("emit", ag_status_str, text ? text : "", -1, NULL, 0) ? 0 : -1;
+}

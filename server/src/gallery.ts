@@ -1,4 +1,5 @@
 /** Ready-to-run sample apps shown in the template gallery. Network samples fetch real public data or use the built-in Relay Hub; nothing is faked. */
+import {voice_board,meeting_minuteman,voice_ledger,desk_oracle} from './voice-templates.ts';
 const todo=(style:number,items:string)=>`var STYLE=${style},REMOTE=STYLE===0&&KEY,S=load('s',{t:${items}}),at=load('at',''),cur=0,top=0,R=4,AUTH='Authorization: Bearer '+KEY;
 function left(){var n=0,i;for(i=0;i<S.t.length;i++)if(!S.t[i][2])n++;return n;}
 function head(){var n=S.t.length,l=left(),d=n-l;
@@ -684,6 +685,7 @@ function on_key(k){
 }`;
 
 const cat={
+ voice:'语音智能看板',
  relay:'电脑同步',
  work:'效率专注',
  board:'信息看板',
@@ -693,6 +695,11 @@ const cat={
 const g=(id:string,c:string,title:string,use:string,refresh:string,code:string,extra:any={})=>({id,cat:c,title,use,refresh,conn_mode:'local',wave_act:'快捷操作',code,...extra});
 
 export const GALLERY=[
+ // 0a. 端侧语音智能看板 (v2.0 On-Device Voice Agent + DSH Full-Suite)
+ g('voice_board',cat.voice,'语音待办管家','按住说话增删勾改待办、双击进入免提长录，默认开口简短播报','tuned',voice_board,{conn_mode:'local',wave_act:'勾选当前待办',voice:{mode:'both',long_trigger:'double_click',tts:'stella',search:true,thinking:false}}),
+ g('meeting_minuteman',cat.voice,'会议长录纪要台','一键绿灯常亮持续收音不断传，结束自动提炼核心结论与三条行动项','tuned',meeting_minuteman,{conn_mode:'local',wave_act:'翻看历史纪要',voice:{mode:'both',long_trigger:'click',tts:'stella',search:false,thinking:false}}),
+ g('voice_ledger',cat.voice,'动口语音记账','随口说花销自动归类累加月支出与预算余量，配语音播报','tuned',voice_ledger,{conn_mode:'local',wave_act:'切换近期账目',voice:{mode:'both',long_trigger:'double_click',tts:'stella',search:false,thinking:false}}),
+ g('desk_oracle',cat.voice,'桌面语音百科台','16 灰磨砂纸感问答卡，按住提问自动联网查证并开口解答','clear',desk_oracle,{conn_mode:'local',wave_act:'翻看历史问答',voice:{mode:'both',long_trigger:'click',tts:'stella',search:true,thinking:false}}),
  // 0. 视觉与液态玻璃展厅 (v1.8 Visual Craft!)
  g('typo_gallery',cat.home,'视觉与字体展厅','一屏实机对比 16 灰液态玻璃、新黑体/宋体抗锯齿、4 灰快刷与微抖动渐变','clear',typo_gallery,{conn_mode:'local',wave_act:'切换下一展板'}),
  g('glass_clock',cat.home,'液态玻璃时钟','16 灰原生磨砂透光玻璃卡片配 48px 几何大时钟，支持冰霜/黑曜/纸墨三风格','clear',glass_clock,{conn_mode:'local',wave_act:'切换玻璃风格'}),

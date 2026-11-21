@@ -245,5 +245,17 @@ int AudioCapture::Write(const int16_t* samples, size_t count) {
     const esp_err_t err=i2s_channel_write(static_cast<i2s_chan_handle_t>(tx_handle_),stereo,count*4,&bytes,100);
     return err==ESP_OK && bytes==count*4 ? static_cast<int>(count):0;
 }
+esp_err_t AudioCapture::SetOutputVolume(int vol) {
+    ScopedI2cBusLock lock("AudioCapture::SetOutputVolume");
+    if (!lock.locked()) return lock.status();
+    if (!device_) return ESP_ERR_INVALID_STATE;
+    return esp_codec_dev_set_out_vol(static_cast<esp_codec_dev_handle_t>(device_), std::clamp(vol, 0, 100));
+}
+esp_err_t AudioCapture::SetInputGain(float db) {
+    ScopedI2cBusLock lock("AudioCapture::SetInputGain");
+    if (!lock.locked()) return lock.status();
+    if (!device_) return ESP_ERR_INVALID_STATE;
+    return esp_codec_dev_set_in_gain(static_cast<esp_codec_dev_handle_t>(device_), db);
+}
 uint32_t AudioCapture::Overruns() const {return overruns_.load();}
 } // namespace ugl

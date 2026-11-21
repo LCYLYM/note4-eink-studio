@@ -28,10 +28,35 @@
 #define FLUSH_DELAY_MS 3000
 #define FULL_REFRESH_EVERY 30 // partial refreshes before a black-flash rebase clears ghosting
 
-extern const uint8_t font_start[] asm("_binary_js_font16_bin_start");
-extern const uint8_t aa_font_start[] asm("_binary_js_fonts_aa_bin_start");
+#define FONT16_RAW_BYTES 679904u
+#define FONTS_AA_RAW_BYTES 923124u
+extern const uint8_t font_zz_start[] asm("_binary_js_font16_bin_zz_start");
+extern const uint8_t font_zz_end[] asm("_binary_js_font16_bin_zz_end");
+extern const uint8_t aa_font_zz_start[] asm("_binary_js_fonts_aa_bin_zz_start");
+extern const uint8_t aa_font_zz_end[] asm("_binary_js_fonts_aa_bin_zz_end");
+static const uint8_t *font_start;
+static const uint8_t *aa_font_start;
 extern const char app_start[] asm("_binary_js_probe_app_js_start");
 extern const char app_end[] asm("_binary_js_probe_app_js_end");
+
+static bool unpack_font_blob(const uint8_t *zstart, const uint8_t *zend, size_t raw_len, const uint8_t **out_ptr) {
+    if (*out_ptr) return true;
+    uint8_t *dst = heap_caps_malloc(raw_len, MALLOC_CAP_SPIRAM);
+    tinfl_decompressor *dec = heap_caps_malloc(sizeof(tinfl_decompressor), MALLOC_CAP_SPIRAM);
+    if (!dst || !dec) { free(dst); free(dec); return false; }
+    tinfl_init(dec);
+    size_t in_bytes = (size_t)(zend - zstart), out_bytes = raw_len;
+    tinfl_status st = tinfl_decompress(dec, zstart, &in_bytes, dst, dst, &out_bytes, TINFL_FLAG_PARSE_ZLIB_HEADER | TINFL_FLAG_USING_NON_WRAPPING_OUTPUT_BUF);
+    free(dec);
+    if (st != TINFL_STATUS_DONE || out_bytes != raw_len) { free(dst); return false; }
+    *out_ptr = dst;
+    return true;
+}
+bool js_fonts_init(void) {
+    return unpack_font_blob(font_zz_start, font_zz_end, FONT16_RAW_BYTES, &font_start) &&
+           unpack_font_blob(aa_font_zz_start, aa_font_zz_end, FONTS_AA_RAW_BYTES, &aa_font_start);
+}
+const uint8_t *n4_font16_ptr(void) { return font_start; }
 
 static JSContext *ctx;
 static uint8_t *mem, *fb, *fb2, *glass_tmp;
@@ -167,6 +192,10 @@ static JSValue js_store_set(JSContext *c, JSValue *t, int argc, JSValue *argv) {
     deadline += esp_timer_get_time() - t0;
     return JS_UNDEFINED;
 }
+static void report_error(const char *where);
+#define JS_AGENT_ARM_DEADLINE() (deadline = esp_timer_get_time() + HANDLER_US)
+#define JS_AGENT_REPORT_ERR(w) report_error(w)
+#include "js_agent.inc"
 #include "note4_stdlib.h"
 
 static void log_write(void *o, const void *b, size_t n) { fwrite(b, 1, n, stdout); }
@@ -227,7 +256,7 @@ static bool start_source(const char *src, size_t len, const char *ns, int mode) 
         }
         if (!asset) asset_count = 0;
     }
-    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; fast_count = 0; waiting_refresh = false; injected[0] = 0; active_font = 0;
+    memset(fb, 0xff, FB_SIZE); dirty = false; force_clear = false; fast_count = 0; waiting_refresh = false; injected[0] = 0; active_font = 0; ag_reset_state();
     snprintf(app_ns, sizeof app_ns, "%s", ns); refresh_mode = mode; dots_mode = mode == N4_DOTS; n4_display_tune(mode != N4_GRAY, mode == N4_TUNED);
     n4_net_app(app_ns);
     scan_store();
@@ -258,7 +287,7 @@ bool js_app_load_file(const char *path, uint32_t offset, uint32_t size, const ch
     free(src);
     return ok;
 }
-void js_app_stop(void) { flush_pending(); tick_ms = 0; if (asset) { fclose(asset); asset = NULL; } free(frame_table); free(frame_packed); free(frame_decoder); frame_table = NULL; frame_packed = NULL; frame_decoder = NULL; if (ctx) { JS_FreeContext(ctx); ctx = NULL; n4_net_app(""); printf("NOTE4 JS {\"call\":\"closed\"}\n"); } }
+void js_app_stop(void) { flush_pending(); ag_reset_state(); tick_ms = 0; if (asset) { fclose(asset); asset = NULL; } free(frame_table); free(frame_packed); free(frame_decoder); frame_table = NULL; frame_packed = NULL; frame_decoder = NULL; if (ctx) { JS_FreeContext(ctx); ctx = NULL; n4_net_app(""); printf("NOTE4 JS {\"call\":\"closed\"}\n"); } }
 void js_app_inject(const char *key) { snprintf(injected, sizeof injected, "%s", key); }
 void js_app_tick(uint32_t bits) {
     if (!ctx) return;
@@ -287,4 +316,64 @@ void js_app_tick(uint32_t bits) {
         }
     }
     if (npending && !busy && now - last_set_ms > FLUSH_DELAY_MS) flush_pending();
+}
+
+// A-Core pre-turn store snapshot (<=16 KiB PSRAM) & declarative Agent bridge
+typedef struct { char path[44]; char *data; size_t len; } snap_entry_t;
+static snap_entry_t turn_snap[8];
+static int nturn_snap = 0;
+
+static void free_turn_snap(void) {
+    for (int i = 0; i < nturn_snap; i++) { free(turn_snap[i].data); turn_snap[i].data = NULL; }
+    nturn_snap = 0;
+}
+void js_agent_store_begin_turn(void) {
+    flush_pending();
+    free_turn_snap();
+    char prefix[16]; int plen = snprintf(prefix, sizeof prefix, "jsk_%s_", app_ns);
+    DIR *d = opendir("/data"); if (!d) return;
+    struct dirent *e; size_t total = 0;
+    while ((e = readdir(d)) && nturn_snap < 8) {
+        if (strncmp(e->d_name, prefix, plen)) continue;
+        char path[64]; snprintf(path, sizeof path, "/data/%.40s", e->d_name);
+        struct stat st; if (stat(path, &st) != 0 || st.st_size <= 0 || st.st_size > VALUE_MAX || total + (size_t)st.st_size > 16384) continue;
+        FILE *f = fopen(path, "rb"); if (!f) continue;
+        char *buf = heap_caps_malloc((size_t)st.st_size, MALLOC_CAP_SPIRAM);
+        if (buf && fread(buf, 1, (size_t)st.st_size, f) == (size_t)st.st_size) {
+            snprintf(turn_snap[nturn_snap].path, sizeof turn_snap[0].path, "%.43s", path);
+            turn_snap[nturn_snap].data = buf;
+            turn_snap[nturn_snap].len = (size_t)st.st_size;
+            nturn_snap++; total += (size_t)st.st_size;
+        } else free(buf);
+        fclose(f);
+    }
+    closedir(d);
+}
+void js_agent_store_commit_turn(void) { flush_pending(); free_turn_snap(); }
+void js_agent_store_rollback_turn(void) {
+    for (int i = 0; i < npending; i++) { free(pending[i].data); pending[i].data = NULL; }
+    npending = 0;
+    for (int i = 0; i < nturn_snap; i++) {
+        FILE *f = fopen(turn_snap[i].path, "wb");
+        if (f) { fwrite(turn_snap[i].data, 1, turn_snap[i].len, f); fclose(f); }
+    }
+    free_turn_snap();
+    scan_store();
+}
+bool js_agent_configured(void) { return ctx != NULL && ag_configured; }
+const char *js_agent_role(void) { return ag_role_buf; }
+const char *js_agent_tools_json(void) { return ag_tools_schema; }
+bool js_agent_read_state(char *out, size_t cap) { return ag_invoke_helper("readState", NULL, NULL, -1, out, cap); }
+bool js_agent_call_tool(const char *name, const char *args_json, char *out, size_t cap) {
+    return ag_invoke_helper("callTool", name, args_json ? args_json : "{}", -1, out, cap);
+}
+void js_agent_emit(const char *phase, const char *text) {
+    ag_utf8_clip(phase ? phase : "idle", phase ? strlen(phase) : 4, ag_status_str, sizeof(ag_status_str));
+    ag_invoke_helper("emit", ag_status_str, text ? text : "", -1, NULL, 0);
+}
+bool js_agent_take_say(char *out, size_t cap) {
+    if (!ag_say_pending) return false;
+    ag_say_pending = false;
+    ag_utf8_clip(ag_say_buf, strlen(ag_say_buf), out, cap);
+    return out[0] != 0;
 }

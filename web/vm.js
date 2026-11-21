@@ -62,5 +62,15 @@ export class Note4Vm {
     return out;
   }
   store() { const o = {}, m = this.m, n = m.vm_store_count(), s = p => { const u = new Uint8Array(m.memory.buffer, p); return dec.decode(u.subarray(0, u.indexOf(0))); }; for (let i = 0; i < n; i++) { const p = m.vm_store_value(i), l = m.vm_store_value_len(i); o[s(m.vm_store_key(i))] = dec.decode(new Uint8Array(m.memory.buffer, p, l)); } return o; }
+  cstrRead(p) { if (!p) return ''; const u = new Uint8Array(this.m.memory.buffer, p); let e = 0; while (u[e]) e++; return dec.decode(u.subarray(0, e)); }
+  agent() {
+    if (!this.m.vm_agent_configured || !this.m.vm_agent_configured()) return {configured: false, toolCount: 0, role: '', tools: []};
+    let tools = []; try { tools = JSON.parse(this.cstrRead(this.m.vm_agent_tools_json()) || '[]'); } catch {}
+    return {configured: true, toolCount: this.m.vm_agent_tool_count(), role: this.cstrRead(this.m.vm_agent_role()), tools};
+  }
+  agentState() { if (!this.m.vm_agent_state) return {ok: false, json: '{}'}; const r = this.m.vm_agent_state(); return {ok: r === 0, json: this.cstrRead(this.m.vm_agent_out())}; }
+  agentProbe(idx) { if (!this.m.vm_agent_probe) return {ok: false, json: '{}'}; const r = this.m.vm_agent_probe(idx); return {ok: r === 0, json: this.cstrRead(this.m.vm_agent_out())}; }
+  agentCall(name, argsJson = '{}') { if (!this.m.vm_agent_call) return {ok: false, json: '{}'}; const [np] = this.cstr(name), [ap] = this.cstr(argsJson); const r = this.m.vm_agent_call(np, ap); this.m.vm_free(np); this.m.vm_free(ap); return {ok: r === 0, json: this.cstrRead(this.m.vm_agent_out())}; }
+  agentEmit(phase, text = '') { if (!this.m.vm_agent_emit) return -1; const [pp] = this.cstr(phase), [tp] = this.cstr(text); const r = this.m.vm_agent_emit(pp, tp); this.m.vm_free(pp); this.m.vm_free(tp); return r; }
   ticks() { return this.m.vm_ticks(); }
 }
