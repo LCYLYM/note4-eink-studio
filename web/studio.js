@@ -585,8 +585,11 @@ function follow(t) {
         S.liveDraftRev = patchedRev;
         syncingDraft = true;
         try {
-          S.work = await api('/works/' + S.work.id);
-          await run(true);
+          const w = await api('/works/' + v.work_id);
+          if (S.work?.id === w.id) {
+            S.work = w;
+            await run(true);
+          }
         } catch {} finally {
           syncingDraft = false;
         }
