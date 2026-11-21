@@ -33,6 +33,14 @@
 ## 效果展示
 
 <p align="center">
+  <a href="https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4">
+    <img src="docs/screenshots/note4-promo.gif" alt="NOTE4 端侧语音与对话创作实机演示动图" width="100%">
+  </a>
+  <br>
+  <sub><b>46 秒完整实机与工作台演示</b> · 点击动图打开 1080p 有声正片（<a href="https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4">GitHub 视频直链</a> ｜ <a href="docs/video/note4-promo.mp4">仓库文件</a>）</sub>
+</p>
+
+<p align="center">
   <img src="docs/screenshots/workspace-voice.png" alt="NOTE4 v2.1 语音与视觉工作台" width="100%">
   <br>
   <sub><b>v2.1 对话创作与 1:1 真机模拟工作台</b> · 左侧支持咨询秒答与增量改码双模分流，右侧完整复刻物理三键长按说话、双击长录、字体切换与五档刷新波形</sub>

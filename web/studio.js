@@ -156,6 +156,38 @@ function tell(m) {
   tell.t = setTimeout(() => t.classList.remove('show'), 3600);
 }
 
+const PROMO_VIDEO_RAW = 'https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4';
+const PROMO_VIDEO_CDN = 'https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@main/docs/video/note4-promo.mp4';
+const PROMO_POSTER_RAW = 'https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/screenshots/note4-promo-poster.jpg';
+const PROMO_POSTER_CDN = 'https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@main/docs/screenshots/note4-promo-poster.jpg';
+
+function promoVideoPlayerHtml(autoplay = true) {
+  return `<video class="film-video" controls ${autoplay ? 'autoplay' : ''} playsinline preload="metadata" poster="${PROMO_POSTER_RAW}">
+    <source src="${PROMO_VIDEO_RAW}" type="video/mp4">
+    <source src="${PROMO_VIDEO_CDN}" type="video/mp4">
+    当前浏览器不支持内嵌播放，<a href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">点此打开 GitHub 视频直链</a>。
+  </video>`;
+}
+
+function openPromoVideoDialog() {
+  $$('video').forEach(v => { try { v.pause(); } catch {} });
+  const d = $('#dialog');
+  d.className = 'cinema';
+  d.innerHTML = `<div class="dlg-head cinema-head">
+    <div class="cinema-title">
+      <span class="film-kicker mono">FILM · 00:46 · 1080P</span>
+      <h2>NOTE4 墨水屏对话创作台 · 实机与语音全链路演示</h2>
+    </div>
+    <button type="button" class="dlg-close cinema-close" data-act="close" aria-label="关闭">×</button>
+  </div>
+  <div class="cinema-stage">${promoVideoPlayerHtml(true)}</div>
+  <div class="cinema-foot">
+    <span class="cinema-note">对话生成 · Finish Gate 零越界核验 · 16 灰液态玻璃 · 端侧按住说话闭环</span>
+    <a class="cinema-ext" href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">GitHub 原片直链 ↗</a>
+  </div>`;
+  if (!d.open) d.showModal();
+}
+
 function openModal(title, html, narrow = false) {
   const d = $('#dialog');
   d.className = narrow ? 'narrow' : '';
@@ -1036,6 +1068,7 @@ function topbarHtml() {
     <button type="button" class="brand-btn" data-act="home"><span class="brand-mark">N4</span><span>NOTE4 创作台</span></button>
     <div class="top-end">
       ${S.view === 'app' ? `<button type="button" class="link under" data-act="home">返回首页</button>` : ''}
+      <button type="button" class="link" data-act="promoVideo">实机短片</button>
       <button type="button" class="link" data-act="demo">1 分钟演示</button>
       ${voiceBtn}
       ${modelBtn}
@@ -1155,6 +1188,26 @@ function homeHtml() {
           <div class="sim-meta" id="heroSimMeta"></div>
           <button type="button" class="btn sm solid" data-act="forkHero">打开改装</button>
         </div>
+      </div>
+    </section>
+
+    <section class="film-card" aria-label="46 秒实机与工作台演示短片">
+      <div class="film-copy">
+        <div class="film-kicker mono"><span class="film-dot" aria-hidden="true"></span>SHORT FILM · 00:46 · 1080P</div>
+        <h2>46 秒看懂：从一句话到桌面墨水屏开口回应</h2>
+        <p class="small">完整记录对话改码、同源 WASM 零越界核验、16 灰液态玻璃刷新、6,917 全字库排版与机身三键按住说话闭环。视频由 GitHub 直链按需流式加载。</p>
+        <div class="film-acts">
+          <button type="button" class="btn sm solid" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>剧场模式播放</button>
+          <button type="button" class="btn sm soft" data-act="playInlineFilm">原位播放</button>
+          <a class="link under" href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">GitHub 原片直链</a>
+        </div>
+      </div>
+      <div class="film-stage" id="homeFilmStage">
+        <button type="button" class="film-poster-btn" data-act="playInlineFilm" aria-label="播放 46 秒实机演示有声短片">
+          <img src="${PROMO_POSTER_RAW}" data-fallback="${PROMO_POSTER_CDN}" alt="NOTE4 46 秒实机演示封面" loading="lazy" width="960" height="540">
+          <span class="film-shade" aria-hidden="true"></span>
+          <span class="film-play-pill" aria-hidden="true"><span class="play-tri"></span><span>播放有声正片 · 00:46</span></span>
+        </button>
       </div>
     </section>
 
@@ -1906,6 +1959,14 @@ const ACTS = {
   },
   flash: () => showFlasher({usb, api, dialog, tell}),
   demo: async () => (await import('./demo.js?v=23')).startDemo(),
+  promoVideo: () => openPromoVideoDialog(),
+  playInlineFilm: () => {
+    const stage = $('#homeFilmStage');
+    if (!stage) return openPromoVideoDialog();
+    $$('video').forEach(v => { try { v.pause(); } catch {} });
+    stage.innerHTML = promoVideoPlayerHtml(true);
+    stage.classList.add('playing');
+  },
 };
 
 document.addEventListener('click', e => {
@@ -2052,6 +2113,26 @@ document.addEventListener('keyup', e => {
 
 window.addEventListener('resize', () => syncClipPills());
 
+$('#dialog')?.addEventListener('close', () => {
+  const d = $('#dialog');
+  if (d?.classList.contains('cinema')) {
+    d.querySelectorAll('video').forEach(v => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch {} });
+    d.innerHTML = '';
+    d.className = '';
+  }
+});
+$('#dialog')?.addEventListener('click', e => {
+  if (e.target === e.currentTarget && e.currentTarget.classList.contains('cinema')) {
+    e.currentTarget.close();
+  }
+});
+document.addEventListener('error', e => {
+  const img = e.target;
+  if (img?.tagName === 'IMG' && img.dataset?.fallback && img.src !== img.dataset.fallback) {
+    img.src = img.dataset.fallback;
+  }
+}, true);
+
 // ---- Login Page ----
 const INK_TILES = [[96,120,250,232,44,'#2B2A26','天气','2.3 KB','#EFEAE0',30],[354,120,190,132,38,'#4A463E','云端桌贴','4.8 KB','#EFEAE0',20],[354,260,110,92,28,'#8A8478','背单词','3.1 KB','#EFEAE0',15],[472,260,72,92,24,'#BDB6A7','木鱼','','#2B2A26',14],[96,360,148,160,36,'#6B665C','番茄钟','4.5 KB','#EFEAE0',20],[252,360,168,160,40,'#A39C8E','AI 盯盘','4.7 KB','#2B2A26',19],[428,360,116,160,30,'#D3CCBC','周易','4.5 KB','#2B2A26',16]];
 function inkArt() {
@@ -2062,7 +2143,7 @@ function inkArt() {
 }
 function loginPage() {
   const q = new URLSearchParams(location.search).get('login_error');
-  $('#root').innerHTML = `<main class="lg"><section class="lg-copy"><strong class="brand-btn"><span class="brand-mark">N4</span>NOTE4 创作台</strong><div class="lg-mid"><div class="lg-num num"><b>64</b><i>KB</i><span>装下一整块桌面墨水屏</span></div><h1>说一句话，给墨水屏做个小应用。</h1><p>番茄钟、天气看板、电脑定时同步桌贴。网页里先试玩，发布后断网也能常显。</p>${q ? `<p class="err">${esc(q)}</p>` : ''}<div class="lg-go"><a class="btn solid" href="/api/auth/sso">微信登录</a><button class="btn" data-act="demo">1 分钟演示</button></div></div></section><figure class="lg-art">${inkArt()}</figure></main>`;
+  $('#root').innerHTML = `<main class="lg"><section class="lg-copy"><strong class="brand-btn"><span class="brand-mark">N4</span>NOTE4 创作台</strong><div class="lg-mid"><div class="lg-num num"><b>64</b><i>KB</i><span>装下一整块桌面墨水屏</span></div><h1>说一句话，给墨水屏做个小应用。</h1><p>番茄钟、天气看板、电脑定时同步桌贴、端侧语音管家。网页里先试玩，发布后断网也能常显。</p>${q ? `<p class="err">${esc(q)}</p>` : ''}<div class="lg-go"><a class="btn solid" href="/api/auth/sso">微信登录</a><button type="button" class="btn soft" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>46 秒实机短片</button><button type="button" class="btn" data-act="demo">1 分钟演示</button></div></div></section><figure class="lg-art">${inkArt()}</figure></main>`;
 }
 
 let lastFocusSync = 0, lastCredCheck = 0;
