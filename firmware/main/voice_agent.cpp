@@ -203,7 +203,7 @@ void mic_pcm_callback(const int16_t* pcm16k, size_t count) {
 
 std::string read_nvs_str(nvs_handle_t h, const char* k, const char* def_val = "") {
     size_t n = 0;
-    if (nvs_get_str(h, k, nullptr, &n) != ESP_OK || n == 0 || n > 1024) return def_val;
+    if (nvs_get_str(h, k, nullptr, &n) != ESP_OK || n == 0 || n > 2200) return def_val;
     std::string s(n, '\0');
     if (nvs_get_str(h, k, s.data(), &n) != ESP_OK) return def_val;
     if (!s.empty() && s.back() == '\0') s.pop_back();
@@ -1113,7 +1113,7 @@ void voice_agent_on_bits(uint32_t bits) {
 }
 
 bool voice_set_cred(const char* kind, const char* token, const char* base_url, const char* model, int64_t rev) {
-    if (!kind || !token || std::strlen(token) < 6 || std::strlen(token) > 512) return false;
+    if (!kind || !token || std::strlen(token) < 6 || std::strlen(token) > 2048) return false;
     std::string k = std::strcmp(kind, "api_key") == 0 ? "api_key" : "dsh_token";
     std::string b = (base_url && base_url[0]) ? base_url : "https://api.deepseek.com";
     std::string m = (model && model[0]) ? model : "deepseek-flash";
