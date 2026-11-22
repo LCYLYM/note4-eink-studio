@@ -2,7 +2,7 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=34';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=39';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -147,13 +147,30 @@ async function api(path, method = 'GET', body) {
   return data;
 }
 
+function promoteToastTopLayer() {
+  const t = $('#toast');
+  if (!t || typeof t.showPopover !== 'function') return;
+  try { if (t.matches(':popover-open')) t.hidePopover(); } catch {}
+  try { t.showPopover(); } catch {}
+}
+
 function tell(m) {
   const t = $('#toast');
   if (!t) return;
   t.textContent = m;
-  t.classList.add('show');
   clearTimeout(tell.t);
-  tell.t = setTimeout(() => t.classList.remove('show'), 3600);
+  clearTimeout(tell.h);
+  promoteToastTopLayer();
+  void t.offsetWidth;
+  t.classList.add('show');
+  tell.t = setTimeout(() => {
+    t.classList.remove('show');
+    if (typeof t.hidePopover === 'function') {
+      tell.h = setTimeout(() => {
+        try { if (t.matches(':popover-open')) t.hidePopover(); } catch {}
+      }, 220);
+    }
+  }, 3600);
 }
 
 const PROMO_VIDEO_RAW = 'https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/video/note4-promo.mp4';
@@ -193,6 +210,7 @@ function openModal(title, html, narrow = false) {
   d.className = narrow ? 'narrow' : '';
   d.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2><button type="button" class="dlg-close" data-act="close" aria-label="关闭">×</button></div>${html}`;
   if (!d.open) d.showModal();
+  if ($('#toast')?.classList.contains('show')) promoteToastTopLayer();
   requestAnimationFrame(() => syncClipPills(d));
 }
 function dialog(title, html) {
