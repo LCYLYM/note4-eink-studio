@@ -17,7 +17,7 @@ const chromeBin = process.env.CHROME_PATH || [
   `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
   `${process.env['ProgramFiles'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
   `${process.env['ProgramFiles(x86)'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
-  ...(process.env.PATH || '').split(path.delimiter).flatMap(d => ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser'].map(n => path.join(d, n))),
+  ...(process.env.PATH || '').split(path.delimiter).flatMap(d => (process.platform === 'win32' ? ['chrome.exe', 'chromium.exe'] : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']).map(n => path.join(d, n))),
 ].find(p => p && existsSync(p));
 if (!chromeBin) { console.error('No Chrome/Chromium found. Set CHROME_PATH to your browser binary.'); process.exit(1); }
 const profile = mkdtempSync(path.join(tmpdir(), 'n4chrome-'));
