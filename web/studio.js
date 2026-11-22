@@ -2,7 +2,7 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=39';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=40';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];

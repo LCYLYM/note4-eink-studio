@@ -201,40 +201,29 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
       ? `<div class="vcred-badge" style="background:#fff7ed;border-color:#fdba74;color:#9a3412"><span>检测到原 DeepSeek 账号已在官网退出或令牌失效，已自动清除本浏览器登录态，请重新扫码登录。</span></div>`
       : `<div class="vcred-badge"><span>当前使用平台限量公益通道（不保证稳定供应） · 登录后自动切换为你自己的 DeepSeek 账号，仅存浏览器本地</span></div>`;
 
-  const isPublicHost = !['localhost', '127.0.0.1', '[::1]'].includes(window.location.hostname);
-
   dialog('DeepSeek 个人账号与语音设置', `
     <div id="vcRoot" style="display:flex;flex-direction:column;gap:14px">
       ${statusHtml}
       <div class="vcred-card">
-        <b>方式一：DeepSeek 官方账号一键登录（推荐）</b>
-        <p class="small" style="margin:4px 0 10px;color:#555">一次授权开通端侧 ASR 语音识别、人声 TTS 播报、实时搜索与 V4.1-Flash 工具推理。凭证仅存当前浏览器本地，写入设备后墨水屏独立直连官方接口。</p>
+        <b>方式一：DeepSeek 官方账号扫码登录（推荐）</b>
+        <p class="small" style="margin:4px 0 10px;color:#555">一次授权开通端侧 ASR 语音识别、人声 TTS 播报、实时搜索与 V4.1-Flash 工具推理。登录凭证仅存在你的浏览器本地与自有墨水屏硬件，服务端不保存任何账号密码或令牌。</p>
+        <div class="vc-callout" style="margin-bottom:10px">
+          <b>看到「无法访问此网站」不要慌，这是正常现象：</b>
+          <ol>
+            <li>点击下方按钮，在打开的 DeepSeek 官方页扫码并点「同意授权」。</li>
+            <li>由于 DeepSeek 官方仅允许跳回本机 <code>127.0.0.1</code>，新标签页提示无法访问时，<b>直接复制该页浏览器地址栏里的完整网址</b>。</li>
+            <li>回到本页点「一键从剪贴板读取」，或粘贴到下方框内即可完成验证。</li>
+          </ol>
+        </div>
         <div class="vc-actions">
           <button type="button" class="btn solid" id="vcStartDsh">打开 DeepSeek 官方页扫码 / 登录</button>
-          <button type="button" class="link under" id="vcShowPaste">${isPublicHost ? '已有回调链接？直接粘贴' : '手动粘贴回调链接'}</button>
         </div>
-        ${isPublicHost ? `<p class="small" id="vcPreTip" style="margin:8px 0 0;color:var(--warn)">提示：公网登录确认后，新标签页跳到 <code>127.0.0.1</code> 并显示「无法访问此网站」属正常现象，直接复制该页地址栏回来即可。</p>` : ''}
-        <div id="vcDshStep" hidden style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
-          <div class="vc-callout">
-            <b>看到「无法访问此网站」不要慌，这是正常现象：</b>
-            <ol>
-              <li>在刚打开的 DeepSeek 官方页扫码并点击「同意授权」。</li>
-              <li>跳转到 <code>http://127.0.0.1:54321/oauth/callback?code=...</code> 显示无法连接时，<b>直接复制浏览器地址栏里的完整网址</b>。</li>
-              <li>回到本页点「一键从剪贴板读取」，或粘贴到下方框内即可自动完成验证。</li>
-            </ol>
-          </div>
+        <div id="vcDshStep" style="margin-top:10px;display:flex;flex-direction:column;gap:9px">
           <input id="vcPasteUrl" type="text" placeholder="粘贴 http://127.0.0.1:54321/oauth/callback?code=... " autocomplete="off">
           <div class="vc-actions">
             <button type="button" class="btn sm solid" id="vcReadClip">一键从剪贴板读取</button>
             <button type="button" class="btn sm soft" id="vcSubmitUrl">验证回调链接</button>
           </div>
-          <details class="vc-adv" id="vcBridgeRow">
-            <summary>进阶：电脑装有 Node 时，也可用终端一行命令自动接住回调</summary>
-            <div class="vc-actions" style="margin-top:8px">
-              <button type="button" class="btn sm soft" id="vcCopyBridge">复制本机自动回调命令</button>
-              <span class="small" style="color:#666">在终端运行后免手动复制地址栏</span>
-            </div>
-          </details>
         </div>
         <div id="vcDshMsg" class="vc-msg" hidden role="status" aria-live="polite" style="margin-top:10px"></div>
       </div>
@@ -253,7 +242,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
     </div>
   `);
 
-  let bridgeCmd = '', authState = '', pollTimer = null, submitting = false, lastTriedUrl = '';
+  let authState = '', submitting = false, lastTriedUrl = '';
   const setInlineMsg = (id, kind, text) => {
     const el = document.getElementById(id);
     if (!el) return;
@@ -265,12 +254,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   const setDshMsg = (kind, text) => setInlineMsg('vcDshMsg', kind, text);
   const setKeyMsg = (kind, text) => setInlineMsg('vcKeyMsg', kind, text);
 
-  const cleanupModal = () => {
-    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
-    window.removeEventListener('message', onMsg);
-  };
   const finish = async (msg, newCred) => {
-    cleanupModal();
     if (newCred) {
       saveLocalVoiceCred(newCred);
       if (usb?.port) await syncVoiceCredOverUsb(usb).catch(() => {});
@@ -280,56 +264,19 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
     openVoiceCredDialog({api, dialog, tell, usb, onUpdated});
   };
 
-  function onMsg(e) {
-    if (e.origin === window.location.origin && e.data?.type === 'note4_dsh_cred' && e.data.cred) {
-      finish('DeepSeek 账号已保存在本机浏览器！', e.data.cred);
-    }
-  }
-  window.addEventListener('message', onMsg);
-  document.getElementById('dialog')?.addEventListener('close', cleanupModal, {once: true});
-
-  document.getElementById('vcShowPaste')?.addEventListener('click', () => {
-    const pre = document.getElementById('vcPreTip');
-    if (pre) pre.hidden = true;
-    const box = document.getElementById('vcDshStep');
-    if (box) box.hidden = false;
-    document.getElementById('vcPasteUrl')?.focus();
-  });
-
   document.getElementById('vcStartDsh')?.addEventListener('click', async e => {
     const btn = e.currentTarget; btn.disabled = true; btn.textContent = '正在请求官方授权链接…';
     setDshMsg('info', '正在向 DeepSeek 申请授权链接…');
     try {
       const r = await api('/ai-cred/dsh/init', 'POST', {});
-      bridgeCmd = r.bridge_cmd || '';
       authState = r.state || '';
       lastTriedUrl = '';
       const win = window.open(r.authorize_url, '_blank');
-      if (!win && r.is_local) location.href = r.authorize_url;
       btn.textContent = '已打开官方登录页（可重新打开）'; btn.disabled = false;
-      if (!r.is_local) {
-        const pre = document.getElementById('vcPreTip');
-        if (pre) pre.hidden = true;
-        const box = document.getElementById('vcDshStep');
-        if (box) box.hidden = false;
-        setDshMsg('info', win ? '已在新标签页打开 DeepSeek 官方页：扫码确认后复制 127.0.0.1 地址栏网址，回来点「一键从剪贴板读取」即可。' : '浏览器拦截了新标签页弹窗，请允许弹窗后重试。');
-        document.getElementById('vcPasteUrl')?.focus();
-      } else {
-        setDshMsg('info', '已打开 DeepSeek 官方授权页，扫码确认后将自动跳回本页完成登录…');
-      }
-      if (pollTimer) clearInterval(pollTimer);
-      const pollDeadline = Date.now() + 180000;
-      pollTimer = setInterval(async () => {
-        if (Date.now() > pollDeadline || !document.getElementById('dialog')?.open) {
-          cleanupModal();
-          return;
-        }
-        const fromLs = readLocalVoiceCred();
-        if (fromLs && (!local || fromLs.rev !== local.rev)) return finish('DeepSeek 账号已保存在本机浏览器！', fromLs);
-        if (!authState) return;
-        const cl = await api('/ai-cred/dsh/claim', 'POST', {state: authState}).catch(() => null);
-        if (cl?.ready && cl.cred) finish('DeepSeek 账号授权完成（已存本机浏览器）！', cl.cred);
-      }, 1800);
+      setDshMsg('info', win
+        ? '已在新标签页打开 DeepSeek 官方页：扫码确认后若看到「无法访问此网站」，直接复制该页地址栏网址，回来点「一键从剪贴板读取」即可。'
+        : '浏览器拦截了新标签页弹窗，请允许弹窗后重试。');
+      document.getElementById('vcPasteUrl')?.focus();
     } catch (err) {
       btn.disabled = false; btn.textContent = '打开 DeepSeek 官方页扫码 / 登录';
       const msg = err.message || '发起授权失败';
@@ -417,13 +364,6 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
       setDshMsg('warn', '浏览器未授予剪贴板读取权限，请直接点击上方输入框按 Ctrl+V / ⌘V 粘贴即可自动验证。');
       pasteInput?.focus();
     }
-  });
-
-  document.getElementById('vcCopyBridge')?.addEventListener('click', async () => {
-    if (!bridgeCmd) return;
-    await navigator.clipboard.writeText(bridgeCmd);
-    setDshMsg('ok', '已复制本机自动回调命令，打开电脑终端粘贴回车后即可自动接住回调。');
-    tell('已复制本机自动桥接命令，在终端粘贴运行即可完成回调');
   });
 
   document.getElementById('vcSaveKey')?.addEventListener('click', async e => {
