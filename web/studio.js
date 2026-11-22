@@ -2,7 +2,7 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=41';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=42';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -135,13 +135,22 @@ function autoGrowPrompt(el = $('#prompt')) {
   el.style.overflowY = el.scrollHeight > 132 ? 'auto' : 'hidden';
 }
 
+// Every API call is time-limited so a hung server becomes a readable Chinese error instead of an endless spinner.
+const API_TIMEOUT_MS = 90000;
 async function api(path, method = 'GET', body) {
   const extra = path.startsWith('/ai-cred') || path.startsWith('/ai/tasks') ? voiceCredHeaders() : {};
-  const r = await fetch('/api' + path, {
-    method,
-    headers: body === undefined ? extra : {'Content-Type': 'application/json', ...extra},
-    body: body === undefined ? undefined : JSON.stringify(body),
-  });
+  let r;
+  try {
+    r = await fetch('/api' + path, {
+      method,
+      headers: body === undefined ? extra : {'Content-Type': 'application/json', ...extra},
+      body: body === undefined ? undefined : JSON.stringify(body),
+      signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(API_TIMEOUT_MS) : undefined,
+    });
+  } catch (e) {
+    const timedOut = e?.name === 'TimeoutError' || e?.name === 'AbortError';
+    throw Object.assign(Error(timedOut ? '请求超时，服务暂时没有响应，请稍后重试' : '无法连接创作台服务，请检查网络或确认本地服务仍在运行'), {status: 0, code: timedOut ? 'CLIENT_TIMEOUT' : 'NETWORK_ERROR'});
+  }
   const data = await r.json().catch(() => ({error: 'HTTP ' + r.status}));
   if (!r.ok) throw Object.assign(Error(data.error || data.message || data.detail || 'HTTP ' + r.status), {status: r.status, code: data.code});
   return data;
@@ -233,13 +242,19 @@ async function copyText(text, label = '已复制到剪贴板') {
     await navigator.clipboard.writeText(text);
     tell(label);
   } catch {
+    // Fallback for non-secure contexts (plain http LAN address). Append inside an open <dialog>,
+    // otherwise the modal makes the rest of the page inert and select()/copy silently fails.
+    const host = $('#dialog')?.open ? $('#dialog') : document.body;
     const ta = document.createElement('textarea');
     ta.value = text;
-    document.body.append(ta);
+    ta.setAttribute('readonly', '');
+    ta.style.cssText = 'position:fixed;top:0;left:0;opacity:0;pointer-events:none';
+    host.append(ta);
     ta.select();
-    document.execCommand('copy');
+    let ok = false;
+    try { ok = document.execCommand('copy'); } catch {}
     ta.remove();
-    tell(label);
+    tell(ok ? label : '浏览器未允许自动复制，请手动选中文本后复制');
   }
 }
 
@@ -296,16 +311,24 @@ async function engine() {
   return vm = await Note4Vm.create(await w.arrayBuffer(), new Uint8Array(await f.arrayBuffer()), 300, aaBytes);
 }
 
+// 16 gray levels -> packed RGBA (little-endian ABGR), computed once. One reusable ImageData
+// avoids allocating 480 KB and running 360k float blends on every tick repaint.
+const GRAY_LUT = new Uint32Array(16);
+for (let g = 0; g < 16; g++) {
+  const ch = n => Math.round(INK[n] + (PAPER[n] - INK[n]) * g / 15);
+  GRAY_LUT[g] = (255 << 24 | ch(2) << 16 | ch(1) << 8 | ch(0)) >>> 0;
+}
+let paintImg = null, paintBuf = null;
 function paintCanvas(canvasId, fastMode) {
   const c = $(canvasId);
   if (!c || !vm) return;
-  const px = vm.pixels(fastMode), ctx = c.getContext('2d'), img = ctx.createImageData(400, 300);
-  for (let i = 0; i < 120000; i++) {
-    const t = px[i] / 15;
-    for (let n = 0; n < 3; n++) img.data[i * 4 + n] = INK[n] + (PAPER[n] - INK[n]) * t;
-    img.data[i * 4 + 3] = 255;
+  const px = vm.pixels(fastMode), ctx = c.getContext('2d');
+  if (!paintImg) {
+    paintImg = ctx.createImageData(400, 300);
+    paintBuf = new Uint32Array(paintImg.data.buffer);
   }
-  ctx.putImageData(img, 0, 0);
+  for (let i = 0; i < 120000; i++) paintBuf[i] = GRAY_LUT[px[i] & 15];
+  ctx.putImageData(paintImg, 0, 0);
 }
 
 function paint() {
@@ -371,12 +394,13 @@ async function pump(q) {
         const i = l.indexOf(':');
         return [l.slice(0, i).trim(), l.slice(i + 1).trim()];
       })),
+      signal: typeof AbortSignal !== 'undefined' && AbortSignal.timeout ? AbortSignal.timeout(15000) : undefined,
     });
     st = r.status;
     body = await r.text();
     if (new Blob([body]).size > 131072) { st = -1; body = ''; note = '响应超过 128KB 上限'; }
-  } catch {
-    note = '浏览器跨域拦截（真机联网不受影响）';
+  } catch (e) {
+    note = e?.name === 'TimeoutError' ? '接口 15 秒内未响应' : '浏览器跨域拦截或网络不通（真机联网不受跨域影响）';
   }
   const ms = Math.round(performance.now() - started);
   if (S.view === 'app') {
@@ -481,8 +505,9 @@ function press(k) {
 
 // ---- Data Loading & Agent Co-Pilot ----
 async function loadWorks() {
-  S.templates ??= (await api('/templates')).templates;
-  S.works = (await api('/works')).works.sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
+  const [tpls, works] = await Promise.all([S.templates ? null : api('/templates'), api('/works')]);
+  if (tpls) S.templates = tpls.templates;
+  S.works = works.works.sort((a, b) => (b.updated_at ?? 0) - (a.updated_at ?? 0));
 }
 
 async function loadRelay() {
@@ -1635,25 +1660,59 @@ function renderLive() {
   }
 }
 
+// True when the source editor holds text the user has not saved yet.
+function sourceDirty() {
+  const ed = $('#source');
+  return !!ed && S.view === 'app' && !!S.work && ed.value !== String(render.srcSeen ?? S.work.spec.js.source ?? '').replace(/\r\n?/g, '\n');
+}
+
+const KEEP_FOCUS_IDS = ['prompt', 'source', 'title', 'tplSearch', 'voiceSimInput'];
 function render() {
   const typed = $('#prompt')?.value;
   const at = S.view + (S.work?.id ?? '');
   const enter = render.at !== at;
+
+  // render() replaces the whole tree. Snapshot what the user would otherwise lose:
+  // keyboard focus + caret, chat scroll position, and unsaved text in the source editor.
+  const focused = document.activeElement;
+  const keep = !enter && focused && KEEP_FOCUS_IDS.includes(focused.id)
+    ? {id: focused.id, start: focused.selectionStart, end: focused.selectionEnd}
+    : null;
+  const oldEd = $('#source');
+  const draft = !enter && oldEd && S.work && render.srcSeen === S.work.spec.js.source && oldEd.value !== render.srcSeen
+    ? {value: oldEd.value, top: oldEd.scrollTop}
+    : null;
+  const oldChat = $('.chat-list');
+  const chatTop = !enter && oldChat ? oldChat.scrollTop : null;
   render.at = at;
 
   $('#root').innerHTML = S.view === 'home' ? homeHtml() : appHtml();
-  if (typed && $('#prompt')) $('#prompt').value = typed;
+  if (typed && $('#prompt')) { $('#prompt').value = typed; autoGrowPrompt(); }
   if (enter) $('#root').firstElementChild?.classList.add('enter');
 
   requestAnimationFrame(() => syncClipPills());
 
   if (S.view === 'home') {
+    render.srcSeen = undefined;
     runHero(S.heroId, true).catch(() => {});
   } else {
     renderStream();
     renderInspectorBody();
     renderLive();
     paint();
+    render.srcSeen = S.work.spec.js.source;
+    const ed = $('#source');
+    if (draft && ed) { ed.value = draft.value; ed.scrollTop = draft.top; }
+    const chat = $('.chat-list');
+    if (chat && chatTop !== null) chat.scrollTop = chatTop;
+  }
+
+  if (keep) {
+    const el = document.getElementById(keep.id);
+    if (el && !el.disabled) {
+      el.focus({preventScroll: true});
+      try { if (keep.start != null) el.setSelectionRange(keep.start, keep.end); } catch {}
+    }
   }
 }
 
@@ -1691,7 +1750,10 @@ const ACTS = {
   device: () => deviceDialog(),
   modelCfg: () => modelDialog(false),
   logout: async () => { await api('/auth/logout', 'POST', {}); location.href = '/'; },
-  close: () => $('#dialog').close(),
+  close: () => {
+    if (setupBusy()) return tell('正在配网或写入固件，请等待完成后再关闭');
+    $('#dialog').close();
+  },
 
   hint: b => {
     const p = $('#prompt');
@@ -1807,7 +1869,11 @@ const ACTS = {
     tell('已换一批随机黑白画作');
   },
 
-  new: async () => {
+  new: async (force = false) => {
+    if (force !== true && sourceDirty() && !window.confirm('源码框中有未保存的修改，确定放弃修改返回首页吗？')) {
+      if (S.work?.id && location.hash.slice(1) !== S.work.id) history.replaceState(null, '', '#' + S.work.id);
+      return;
+    }
     stopFollow();
     S.task = null;
     interruptSimulatorVoice();
@@ -1821,7 +1887,7 @@ const ACTS = {
     await loadWorks();
     if (S.view === 'home') render();
   },
-  home: async () => ACTS.new(),
+  home: async () => ACTS.new(false),
   open: b => openWork(b.dataset.id),
 
   del: async b => {
@@ -1837,7 +1903,7 @@ const ACTS = {
     if (Date.now() - b.dataset.at < 350) return;
     await api('/works/' + b.dataset.id, 'DELETE');
     S.works = S.works?.filter(w => w.id !== b.dataset.id);
-    if (S.view === 'app') { await ACTS.new(); tell('已删除'); return; }
+    if (S.view === 'app') { await ACTS.new(true); tell('已删除'); return; }
     b.closest('.work-card')?.classList.add('gone');
     setTimeout(render, 180);
     tell('已删除');
@@ -2119,6 +2185,21 @@ document.addEventListener('keydown', e => {
     e.target.form?.requestSubmit();
     return;
   }
+  // Source editor: Cmd/Ctrl+S saves and reruns, Tab indents two spaces (Shift+Tab / Esc keep normal focus navigation).
+  if (e.target.id === 'source') {
+    if ((e.metaKey || e.ctrlKey) && !e.altKey && (e.key === 's' || e.key === 'S')) {
+      e.preventDefault();
+      act('saveSource', null, ACTS.saveSource);
+      return;
+    }
+    if (e.key === 'Tab' && !e.shiftKey && !e.metaKey && !e.ctrlKey && !e.altKey && !e.isComposing) {
+      e.preventDefault();
+      const ed = e.target;
+      ed.setRangeText('  ', ed.selectionStart, ed.selectionEnd, 'end');
+      return;
+    }
+    if (e.key === 'Escape') { e.target.blur(); return; }
+  }
   if ($('#dialog')?.open || e.target.matches('input,textarea,select') || e.metaKey || e.ctrlKey || e.altKey) return;
   if (e.key === 'Enter' && S.view === 'app' && !e.target.closest('button')) {
     e.preventDefault();
@@ -2142,6 +2223,40 @@ document.addEventListener('keyup', e => {
 });
 
 window.addEventListener('resize', () => syncClipPills());
+
+// Browser Back / Forward (and hand-edited #id): keep the visible view in sync with the URL hash.
+// openWork()/ACTS.new() set the hash themselves, so the guards below make those self-triggered events no-ops.
+window.addEventListener('hashchange', () => {
+  if (!S.config) return;
+  const id = location.hash.slice(1);
+  if (!id) {
+    if (S.view === 'app') act('nav', null, () => ACTS.new(false));
+    return;
+  }
+  if (S.work?.id === id && S.view === 'app') return;
+  if (sourceDirty() && !window.confirm('源码框中有未保存的修改，确定放弃修改切换作品吗？')) {
+    if (S.work?.id) history.replaceState(null, '', '#' + S.work.id);
+    return;
+  }
+  if (S.works.some(w => w.id === id && w.spec.kind === 'js')) act('nav', null, () => openWork(id));
+});
+
+// Warn before a refresh / tab close throws away unsaved source-editor text.
+window.addEventListener('beforeunload', e => {
+  if (!sourceDirty()) return;
+  e.preventDefault();
+  e.returnValue = '';
+});
+
+// Esc must not close the dialog while WiFi provisioning / firmware check is mid-flight:
+// the flow keeps writing progress into dialog nodes and would crash on the emptied DOM.
+const setupBusy = () => !!$('#setupBtn')?.disabled;
+$('#dialog')?.addEventListener('cancel', e => {
+  if (setupBusy()) {
+    e.preventDefault();
+    tell('正在配网或写入固件，请等待完成后再关闭');
+  }
+});
 
 $('#dialog')?.addEventListener('close', () => {
   const d = $('#dialog');
@@ -2214,9 +2329,9 @@ async function boot() {
   S.config = await api('/config');
   S.user = (await api('/auth/me')).user;
   S.aiCred = readLocalVoiceCred();
-  await loadWorks();
-  await loadDevices().catch(() => {});
-  const active = (await api('/ai/tasks')).tasks.find(t => ACTIVE.includes(t.state));
+  // Independent reads go out together: first paint no longer waits for four sequential round-trips.
+  const [, , taskList] = await Promise.all([loadWorks(), loadDevices().catch(() => {}), api('/ai/tasks')]);
+  const active = taskList.tasks.find(t => ACTIVE.includes(t.state));
   const id = active?.work_id ?? location.hash.slice(1);
   if (id && S.works.some(w => w.id === id && w.spec.kind === 'js')) await openWork(id);
   else render();

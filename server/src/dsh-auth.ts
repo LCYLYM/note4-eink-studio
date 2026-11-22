@@ -96,8 +96,11 @@ function buildV1(baseUrl: string, sub: string): string {
 }
 
 async function extFetch(platform: any, url: string, init: RequestInit, userCustomBase = false): Promise<Response> {
+  if (userCustomBase && platform.env.DEV_MODE !== 'true' && !platform.env.safeFetch) {
+    throw Error('SAFE_FETCH_REQUIRED');
+  }
   const fn = userCustomBase && platform.env.DEV_MODE !== 'true'
-    ? (platform.env.safeFetch ?? platform.env.modelFetch ?? fetch)
+    ? platform.env.safeFetch
     : (platform.env.modelFetch ?? fetch);
   return fn(url, {...init, signal: init.signal ?? AbortSignal.timeout(15000)});
 }
@@ -524,8 +527,11 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
       return Response.json({error: '端侧同款语音识别需要 DeepSeek 官方账号登录态', code: 'ASR_REQUIRES_DSH'}, {status: 400});
     }
     const raw = new Uint8Array(await r.arrayBuffer());
-    if (raw.byteLength < 1024 || raw.byteLength > 4 * 1024 * 1024) {
+    if (raw.byteLength < 1024) {
       return Response.json({text: '', empty: true}, {headers: {'Cache-Control': 'no-store'}});
+    }
+    if (raw.byteLength > 4 * 1024 * 1024) {
+      return Response.json({error: '录音文件超出上限，请缩短单次说话时长', code: 'ASR_TOO_LARGE'}, {status: 413, headers: {'Cache-Control': 'no-store'}});
     }
     const boundary = '----N4SimAsrBoundary7e9a';
     const head = enc.encode(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="chunk.wav"\r\nContent-Type: audio/wav\r\n\r\n`);
@@ -544,7 +550,11 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     }
     const aj: any = await ar.json().catch(() => ({}));
     if (!ar.ok) {
-      return Response.json({text: '', empty: true, status: ar.status, detail: String(aj?.error?.message || aj?.msg || '').slice(0, 120)}, {headers: {'Cache-Control': 'no-store'}});
+      const detail = String(aj?.error?.message || aj?.msg || '').slice(0, 120);
+      return Response.json(
+        {error: '语音识别服务暂不可用（HTTP ' + ar.status + '）' + (detail ? '：' + detail : ''), status: ar.status, detail},
+        {status: ar.status === 429 ? 429 : 502, headers: {'Cache-Control': 'no-store'}}
+      );
     }
     return Response.json({text: String(aj?.text || '').trim()}, {headers: {'Cache-Control': 'no-store'}});
   }

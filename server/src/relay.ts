@@ -192,9 +192,12 @@ export class RelayHub {
   private async resolveToken(token: string) {
     if (!token || !/^n4r_[a-f0-9]{24,64}$/.test(token)) problem('中转密钥格式无效', 401, 'RELAY_UNAUTHORIZED');
     const keyHash = await sha(token);
-    this.s.accounts.rate('relay:' + keyHash, 60);
     const idx = this.s.get('relay_index', keyHash);
-    if (!idx) problem('中转通道不存在或密钥已重置', 401, 'RELAY_UNAUTHORIZED');
+    if (!idx) {
+      this.s.accounts.rate('relay:invalid_probe', 240);
+      problem('中转通道不存在或密钥已重置', 401, 'RELAY_UNAUTHORIZED');
+    }
+    this.s.accounts.rate('relay:' + keyHash, 60);
     const row = this.s.get('relay', idx.work_id);
     if (!row || row.token !== token) problem('中转密钥已失效', 401, 'RELAY_UNAUTHORIZED');
     return row;

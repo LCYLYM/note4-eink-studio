@@ -57,6 +57,9 @@ function friendlyModelError(err: any, base: string, isUserRuntime = false): stri
   if (/MODEL_HTTP_429/.test(msg)) {
     return '模型服务当前限流或额度不足，请稍后点「继续修复」重试';
   }
+  if (/STREAM_TOO_LARGE/.test(msg) || code === 'STREAM_TOO_LARGE') {
+    return '模型返回内容超出安全上限，请精简指令后重试';
+  }
   return '模型服务返回异常，请稍后点「继续修复」重试';
 }
 
@@ -95,6 +98,8 @@ async function consumeSSE(
   const toolMap = new Map<number, {id: string; type: 'function'; function: {name: string; arguments: string}}>();
   let toolArgBytes = 0;
   let lastToolName = '';
+  let sawDone = false;
+  let totalBytes = 0;
 
   const readWithIdle = async () => {
     let timer: any;
@@ -121,7 +126,11 @@ async function consumeSSE(
     if (!line || line.startsWith(':')) return;
     if (!line.startsWith('data:')) return;
     const dataStr = line.slice(5).trim();
-    if (!dataStr || dataStr === '[DONE]') return;
+    if (!dataStr) return;
+    if (dataStr === '[DONE]') {
+      sawDone = true;
+      return;
+    }
     let chunk: any;
     try {
       chunk = JSON.parse(dataStr);
@@ -145,7 +154,7 @@ async function consumeSSE(
     }
     if (Array.isArray(delta.tool_calls)) {
       for (const tc of delta.tool_calls) {
-        const idx = Number.isInteger(tc.index) ? tc.index : toolMap.size;
+        const idx = Number.isInteger(tc.index) ? tc.index : tc.id || !toolMap.size ? toolMap.size : toolMap.size - 1;
         let slot = toolMap.get(idx);
         if (!slot) {
           slot = {
@@ -178,7 +187,11 @@ async function consumeSSE(
       if (signal.aborted) throw Error('CANCELLED');
       const part = await readWithIdle();
       if (part.done) break;
+      totalBytes += part.value.byteLength;
       buf += dec.decode(part.value, {stream: true});
+      if (totalBytes > 4 * 1024 * 1024 || buf.length > 262144) {
+        throw Object.assign(Error('STREAM_TOO_LARGE'), {code: 'STREAM_TOO_LARGE'});
+      }
       let nl = buf.indexOf('\n');
       while (nl !== -1) {
         processLine(buf.slice(0, nl));
@@ -193,6 +206,10 @@ async function consumeSSE(
   } finally {
     reader.cancel().catch(() => {});
     reader.releaseLock();
+  }
+
+  if (!finishReason && !sawDone) {
+    throw Object.assign(Error('STREAM_ENDED_EARLY'), {code: 'ECONNRESET'});
   }
 
   const tool_calls = [...toolMap.entries()]
@@ -338,23 +355,31 @@ export class ModelRouter {
     await this.slot(signal);
     const meter = {known_tokens: 0, cached_tokens: 0, usage_unknown: false, request_attempts: 0};
     try {
-      const rawBase = userRuntime
-        ? (userRuntime.kind === 'dsh_token' ? 'https://api.deepseek.com/v1' : String(userRuntime.base_url || 'https://api.deepseek.com').trim())
-        : this.baseUrl();
+      const devMode = this.s.env.DEV_MODE === 'true';
+      let rawBase: string;
+      if (userRuntime) {
+        if (userRuntime.kind === 'dsh_token') {
+          rawBase = 'https://api.deepseek.com/v1';
+        } else {
+          const safeBase = sanitizeUserBaseUrl(userRuntime.base_url, devMode);
+          if (!safeBase) problem('个人模型接口地址无效或不允许访问内网地址', 400);
+          rawBase = safeBase;
+        }
+      } else {
+        rawBase = this.baseUrl();
+      }
       const cleanBase = rawBase.replace(/\/+$/, '');
       const base = userRuntime && !cleanBase.endsWith('/v1') && !cleanBase.endsWith('/chat/completions') ? cleanBase + '/v1' : cleanBase;
       const key = userRuntime ? userRuntime.token : this.apiKey();
       const isHttp = base.startsWith('http://');
-      const devMode = this.s.env.DEV_MODE === 'true';
       if (isHttp && !devMode) problem('生产环境模型接口必须使用 HTTPS', 400);
-      if (userRuntime && userRuntime.kind === 'api_key') {
-        const safeBase = sanitizeUserBaseUrl(userRuntime.base_url, devMode);
-        if (!safeBase) problem('个人模型接口地址无效或不允许访问内网地址', 400);
+      if (userRuntime && userRuntime.kind === 'api_key' && !devMode && !this.s.env.safeFetch) {
+        problem('出站安全网关未就绪', 500);
       }
       const doFetch = isHttp
         ? fetch
         : userRuntime && userRuntime.kind === 'api_key' && !devMode
-          ? (this.s.env.safeFetch ?? this.s.env.modelFetch ?? fetch)
+          ? this.s.env.safeFetch
           : (this.s.env.modelFetch ?? fetch);
       const userModelName = userRuntime ? (userRuntime.model || 'deepseek-flash') : '';
       const candidates: Backend[] = userRuntime
@@ -464,9 +489,10 @@ export class ModelRouter {
           const ct = String(response.headers.get('content-type') ?? '').toLowerCase();
           try {
             if (ct.includes('text/event-stream')) {
+              clearTimeout(timer);
               data = await consumeSSE(response, Math.min(AGENT_LIMITS.idle_ms, requestMs), control.signal, onDelta);
             } else {
-              data = await readJSON(response);
+              data = await readJSON(response, 4 * 1024 * 1024);
             }
           } catch (error) {
             meter.usage_unknown = true;
@@ -479,6 +505,9 @@ export class ModelRouter {
             meter.cached_tokens += u.cached;
           } else {
             meter.usage_unknown = true;
+            const inBytes = new TextEncoder().encode(JSON.stringify(payload.messages ?? '')).byteLength;
+            const outBytes = new TextEncoder().encode(JSON.stringify(data.choices?.[0]?.message ?? '')).byteLength;
+            meter.known_tokens += Math.max(1, Math.ceil((inBytes + outBytes) / 3));
           }
 
           if (!data.choices?.[0]?.message) throw Error('MODEL_MESSAGE_MISSING');

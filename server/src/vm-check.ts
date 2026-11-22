@@ -6,7 +6,8 @@ import {existsSync, readFileSync} from 'node:fs';
 
 // wasm takes about 8 ms on the benchmark the device runs in 292 ms.
 export const DEVICE_SLOWDOWN = 36;
-const DEVICE_LIMIT_MS = 1000, TICK_LIMIT = 300;
+const DEVICE_LIMIT_MS = 1000, NET_LIMIT_MS = 3000, TICK_LIMIT = 300;
+const WORKER_WALL_TIMEOUT_MS = 4500, MAX_PENDING_CHECKS = 8;
 let vm: Promise<Note4Vm> | undefined;
 function loadAaFont(): Uint8Array | undefined {
   for (const rel of ['../firmware/main/js_fonts_aa.bin', '../web/vendor/fonts_aa.bin', 'firmware/main/js_fonts_aa.bin', 'web/vendor/fonts_aa.bin']) {
@@ -55,27 +56,120 @@ const fail = (where: string, log: string, srcForCtx?: string) => {
 
 export type MockNetMap = Record<string, {status?: number; body?: unknown}>;
 
-// The WASM VM holds global state (framebuffer, store, netQueue); concurrent
-// checks would interleave and corrupt each other's results, so serialize them.
+// Preemptive Worker isolation (A1): prevents infinite or heavy drawing loops inside WASM
+// from blocking the main HTTP/SSE event loop, terminating hung checks after 4.5s wall time.
 let queue: Promise<unknown> = Promise.resolve();
-export function checkJs(spec: any, mockNet?: MockNetMap) {
-  const run = queue.then(() => runCheck(spec, mockNet));
-  queue = run.catch(() => {});
-  return run;
+let pendingChecks = 0;
+let checkWorker: any = null;
+let checkSeq = 0;
+let workerEnvPromise: Promise<{Worker: any; workerPath: string} | null> | undefined;
+
+function getWorkerEnv() {
+  return (workerEnvPromise ??= (async () => {
+    try {
+      const wt = await import('node:worker_threads');
+      if (!wt.isMainThread) return null;
+      const {fileURLToPath} = await import('node:url');
+      const p = fileURLToPath(new URL('./vm-check-worker.mjs', import.meta.url));
+      return existsSync(p) ? {Worker: wt.Worker, workerPath: p} : null;
+    } catch {
+      return null;
+    }
+  })());
 }
 
-async function runCheck(spec: any, mockNet?: MockNetMap) {
+function runInWorker(WorkerCtor: any, workerPath: string, spec: any, mockNet?: MockNetMap): Promise<any> {
+  return new Promise((resolve, reject) => {
+    let w = checkWorker;
+    if (!w) {
+      const created = new WorkerCtor(workerPath, {resourceLimits: {maxOldGenerationSizeMb: 96}});
+      created.on('error', () => { if (checkWorker === created) checkWorker = null; });
+      created.on('exit', () => { if (checkWorker === created) checkWorker = null; });
+      created.unref();
+      checkWorker = created;
+      w = created;
+    }
+    const id = ++checkSeq;
+    let settled = false;
+    w.ref();
+    const cleanup = () => {
+      clearTimeout(timer);
+      w?.off('message', onMsg);
+      w?.off('error', onErr);
+      w?.off('exit', onExit);
+      if (checkWorker === w && pendingChecks <= 1) w.unref();
+    };
+    const killWorker = () => {
+      if (checkWorker === w) checkWorker = null;
+      try { w?.terminate(); } catch {}
+    };
+    const onMsg = (m: any) => {
+      if (!m || m.id !== id || settled) return;
+      settled = true;
+      cleanup();
+      if (m.ok) resolve(m.value);
+      else reject(Error(m.error || 'JS check failed'));
+    };
+    const onErr = (err: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      killWorker();
+      reject(err);
+    };
+    const onExit = (code: number) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (checkWorker === w) checkWorker = null;
+      reject(Error(`JS check worker exited unexpectedly (code ${code})`));
+    };
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      killWorker();
+      reject(Error(`JS check timed out after ${WORKER_WALL_TIMEOUT_MS}ms on server: infinite loop or excessive drawing in handler`));
+    }, WORKER_WALL_TIMEOUT_MS);
+
+    w.on('message', onMsg);
+    w.on('error', onErr);
+    w.on('exit', onExit);
+    try {
+      w.postMessage({id, spec, mockNet});
+    } catch (e) {
+      settled = true;
+      cleanup();
+      reject(e);
+    }
+  });
+}
+
+export function checkJs(spec: any, mockNet?: MockNetMap): Promise<any> {
+  if (pendingChecks >= MAX_PENDING_CHECKS) {
+    return Promise.reject(Object.assign(Error('真机校验队列繁忙，请稍后重试'), {status: 429, code: 'CHECK_BUSY'}));
+  }
+  pendingChecks++;
+  const run = queue.then(async () => {
+    const env = await getWorkerEnv();
+    return env ? runInWorker(env.Worker, env.workerPath, spec, mockNet) : runCheckDirect(spec, mockNet);
+  });
+  queue = run.catch(() => {});
+  return run.finally(() => { pendingChecks = Math.max(0, pendingChecks - 1); });
+}
+
+export async function runCheckDirect(spec: any, mockNet?: MockNetMap) {
   const v = await load();
   const keys = ['ok', 'up', 'down', 'ok', 'down', 'up', ...(spec.js.wave ? ['wave'] : [])];
   const frames = spec.js.asset ? 64 : (spec.js.photos?.length ?? 0);
   let slowest = 0;
   const jsSrc = buildFontPreamble(spec.js.font) + ensureVoiceComponentSource(spec.js.source);
-  const timed = (fn: () => number, where: string, retryOnJitter = false, ctxSrc = jsSrc) => {
+  const timed = (fn: () => number, where: string, retryOnJitter = true, limitMs = DEVICE_LIMIT_MS, ctxSrc = jsSrc) => {
     v.clearLog();
     const t = performance.now(), r = fn();
     let ms = (performance.now() - t) * DEVICE_SLOWDOWN;
     if (r !== 0) fail(where, v.log(), ctxSrc);
-    if (ms > DEVICE_LIMIT_MS && retryOnJitter && ms < 60000) {
+    if (ms > limitMs && retryOnJitter && ms < 60000) {
       // Single idempotent retry filters out transient Node GC / OS scheduler hiccups.
       v.clearLog();
       const t2 = performance.now(), r2 = fn();
@@ -84,8 +178,8 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       ms = Math.min(ms, ms2);
     }
     slowest = Math.max(slowest, ms);
-    if (ms > DEVICE_LIMIT_MS) {
-      throw Error(`${where} would take about ${Math.round(ms)} ms on the device; handlers must stay under ${DEVICE_LIMIT_MS} ms`);
+    if (ms > limitMs) {
+      throw Error(`${where} would take about ${Math.round(ms)} ms on the device; handlers must stay under ${limitMs} ms`);
     }
   };
 
@@ -147,7 +241,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
   }
   let dropped = 0;
   for (const q of v.netQueue.splice(0)) {
-    timed(() => v.net(q.key, 0, ''), `on_net('${q.key}',0)`);
+    timed(() => v.net(q.key, 0, ''), `on_net('${q.key}',0)`, true, NET_LIMIT_MS);
     dropped++;
   }
   const off = v.oob();
@@ -168,7 +262,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       (spec.js.conn_mode === 'apikey'
         ? 'var SECRET="sandbox-mock-key";\n'
         : 'var SECRET="https://sandbox.note4.invalid/api/relay/mock";\n');
-    timed(() => v.start(mockPreamble + jsSrc, {}, mode, frames), 'on_start(mock_net)', true);
+    timed(() => v.start(mockPreamble + jsSrc, {}, mode, frames), 'on_start(mock_net)', true, DEVICE_LIMIT_MS, mockPreamble + jsSrc);
     v.dirty();
     const queued = v.netQueue.splice(0);
     for (const q of queued) {
@@ -176,7 +270,7 @@ async function runCheck(spec: any, mockNet?: MockNetMap) {
       if (!entry) continue;
       const status = Number.isInteger(entry.status) ? Number(entry.status) : 200;
       const bodyStr = typeof entry.body === 'string' ? entry.body : JSON.stringify(entry.body ?? {});
-      timed(() => v.net(q.key, status, bodyStr.slice(0, 65536)), `on_net('${q.key}',${status})`);
+      timed(() => v.net(q.key, status, bodyStr.slice(0, 65536)), `on_net('${q.key}',${status})`, true, NET_LIMIT_MS);
       mockTested++;
     }
     const mockOff = v.oob();

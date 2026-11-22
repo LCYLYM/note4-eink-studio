@@ -27,7 +27,7 @@
     }
   ],
   "vars": {
-    "DEV_MODE": "true"
+    "DEV_MODE": "false"
   },
   "env": {
     "production": {

@@ -841,6 +841,8 @@ export function createSimHardwareVoice({getCtx, onKeyOk, onRevoked, api, paint, 
         tell('DeepSeek 登录态已在官网退出或失效，已自动清除本地登录态，请重新登录');
         return;
       }
+      // A failed upstream (429 / 5xx / body too large) is a service error, not "we could not hear you".
+      if (!r.ok) throw Error(data?.error || data?.message || '转写服务返回 HTTP ' + r.status);
       const heard = String(data?.text || '').trim();
       if (!heard) {
         setSimLed('off');

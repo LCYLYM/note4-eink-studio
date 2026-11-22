@@ -242,7 +242,7 @@ function draw(){var list=S.m,n=list.length,t=list[cur];
  box(M,42,372,172,0);ui.rect(M+3,214,372,3,0);ui.rect(386,45,3,172,0);
  var tag=clip(t.from||'投递',80),tw1=tw(tag)+16;ui.rect(26,54,tw1,22,0);ui.text(34,57,tag,1,15);
  ui.text(34+tw1+8,57,clip(t.who||'',140),1,0);right(374,57,(cur+1)+'/'+n,0);
- ui.text(26,90,t.text.slice(0,28),2,0,344);
+ ui.text(26,90,t.text.slice(0,20),2,0,344);
  if(S.ack[t.id]){ui.rect(306,178,68,24,0);cx(306,68,182,'已阅',1,15);}else{box(306,178,68,24,0);cx(306,68,182,'待确认',1,0);}
  ui.text(M,232,S.ack[t.id]?'已向中转站回传已阅回执':'按确认或挥手回传「已阅」到电脑收件箱',1,0);
  ui.present();}

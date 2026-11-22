@@ -43,6 +43,8 @@ export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserM
   };
 
   let truncatedRetries = 0;
+  let pasteGuardCount = 0;
+  let fgGuardCount = 0;
   let lastFailSig = '';
   let sameSigCount = 0;
   let lastFailErr = '';
@@ -218,7 +220,13 @@ export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserM
         try {
           const actual = s.work(auth.id, task.work_id, auth.works);
           const editedInThisTask = actual.rev !== initial.rev;
-          if (!editedInThisTask && /```(?:js|javascript)?/i.test(String(msg.content))) {
+          const contentStr = String(msg.content ?? '');
+          const pastesSource = /```(?:js|javascript)\s*\n[\s\S]{360,}?```/i.test(contentStr) || (contentStr.length >= 240 && /function\s+on_start\s*\(/.test(contentStr));
+          if (!editedInThisTask && pastesSource) {
+            pasteGuardCount = (pasteGuardCount ?? 0) + 1;
+            if (pasteGuardCount >= 3) {
+              throw Object.assign(Error('LOOP_GUARD_PAUSED: Model repeatedly pasted source instead of calling edit tools'), {code: 'LOOP_GUARD_PAUSED', pauseInsteadOfFail: true});
+            }
             throw Error('Do not print source code in chat; apply the change with edit_source or patch_fields and verify with check_work.');
           }
           // Auto-provision Cloud Relay channel if the Agent switched the work to conn_mode='relay' or used RELAY outside the KIT header
@@ -243,6 +251,12 @@ export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserM
           let checked: any = null;
           if (editedInThisTask || latest.rev !== initial.rev) {
             checked = await s.checkWork(auth.id, latest.id, latest.rev, auth.works);
+            if (checked?.js && checked.js.finish_gate_passed === false) {
+              fgGuardCount = (fgGuardCount ?? 0) + 1;
+              if (fgGuardCount <= 2) {
+                throw Error('Finish Gate layout check failed: ' + (checked.js.layout_errors ?? []).slice(0, 4).join(' | '));
+              }
+            }
           } else {
             checked = await s.checkWork(auth.id, latest.id, latest.rev, auth.works).catch(() => null);
           }
@@ -256,15 +270,22 @@ export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserM
             live();
             task.steps.push({tool: 'platform_final_service_check', result: toolReceipt(review), at: Date.now()});
           }
+          const changedNow = latest.rev !== initial.rev;
+          const cleanReply = redactReply(msg.content);
+          const fallbackReply = changedNow && checked?.ok !== false ? '已保存并通过真机引擎核验。' : changedNow ? '已保存更新。' : '';
+          if (!cleanReply && !fallbackReply) {
+            throw Error('Empty reply; answer the user directly or apply the requested edit.');
+          }
           task.state = 'completed';
           task.actual_rev = latest.rev;
-          task.changed = latest.rev !== initial.rev;
-          task.reply = redactReply(msg.content) || '已保存并通过真机引擎核验。';
+          task.changed = changedNow;
+          task.reply = cleanReply || fallbackReply;
           task.check = checked;
           task.usage_unknown = unknownUsage;
           checkpoint('completed');
           return;
         } catch (e: any) {
+          if (e?.pauseInsteadOfFail || e?.message === 'CANCELLED') throw e;
           live();
           messages.push({
             role: 'user',
@@ -312,21 +333,29 @@ export async function runAgent(s: any, task: any, auth: any, userRuntime?: UserM
           } catch (e: any) {
             if (e?.message === 'CANCELLED') throw e;
             const errStr = String(e?.message ?? 'Validation error');
-            sameSigCount = callSig === lastFailSig ? sameSigCount + 1 : 1;
-            lastFailSig = callSig;
-            sameErrCount = errStr === lastFailErr ? sameErrCount + 1 : 1;
-            lastFailErr = errStr;
-            const latestRev = s.work(auth.id, task.work_id, auth.works)?.rev;
-            result = {
-              ok: false,
-              error: errStr,
-              code: e?.code ?? 'VALIDATION',
-              ...(latestRev !== undefined ? {current_rev: latestRev} : {}),
-              next_action:
-                sameSigCount >= 2
-                  ? 'You repeated the exact same failing call. Change your approach, inspect get_work if needed, or simplify the layout.'
-                  : 'Fix the specific error using the current_rev and capability contract.',
-            };
+            if (errStr === 'TOOL_BUDGET') {
+              result = {
+                ok: false,
+                code: 'TOOL_BUDGET',
+                error: `At most ${AGENT_LIMITS.tools_per_reply} tool calls per reply (max ${AGENT_LIMITS.max_tools} per task); resend any remaining calls in the next turn.`,
+              };
+            } else {
+              sameSigCount = callSig === lastFailSig ? sameSigCount + 1 : 1;
+              lastFailSig = callSig;
+              sameErrCount = errStr === lastFailErr ? sameErrCount + 1 : 1;
+              lastFailErr = errStr;
+              const latestRev = s.work(auth.id, task.work_id, auth.works)?.rev;
+              result = {
+                ok: false,
+                error: errStr,
+                code: e?.code ?? 'VALIDATION',
+                ...(latestRev !== undefined ? {current_rev: latestRev} : {}),
+                next_action:
+                  sameSigCount >= 2
+                    ? 'You repeated the exact same failing call. Change your approach, inspect get_work if needed, or simplify the layout.'
+                    : 'Fix the specific error using the current_rev and capability contract.',
+              };
+            }
           }
           const safe = textBytes(result) > 131072 ? {ok: false, code: 'RESULT_TOO_LARGE', next_action: 'Read a smaller artifact slice.'} : result;
           messages.push({role: 'tool', tool_call_id: call.id, content: JSON.stringify(safe)});

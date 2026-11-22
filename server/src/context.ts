@@ -152,9 +152,12 @@ export function compactContext(
   steps: any[],
   oldMessages: any[] = []
 ) {
-  const reqs = (canonical?.requirements ?? [])
-    .slice(-12)
-    .map((r: any) => String(r?.text ?? '').replace(/\s+/g, ' ').slice(0, 160))
+  const recentReqs = (canonical?.requirements ?? []).slice(-12);
+  const reqs = recentReqs
+    .map((r: any, idx: number) => {
+      const raw = String(r?.text ?? '').trim();
+      return idx === recentReqs.length - 1 ? raw : raw.replace(/\s+/g, ' ').slice(0, 320);
+    })
     .filter(Boolean);
 
   // Extract concise recent dialogue turns (user request text + assistant plain reply)
