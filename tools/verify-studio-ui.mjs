@@ -1,16 +1,39 @@
 import {spawn} from 'node:child_process';
-import {mkdtempSync} from 'node:fs';
+import {existsSync, mkdtempSync} from 'node:fs';
 import {tmpdir} from 'node:os';
 import path from 'node:path';
 // Real-browser check of the studio UI (dev mode server required):
 //   PORT=8811 npm --prefix server run studio   then   node tools/verify-studio-ui.mjs http://127.0.0.1:8811/
 // Needs Node 24+ and a local Chrome/Chromium (override with CHROME_PATH). Creates one work and deletes it again.
 const base = process.argv[2] || process.env.NOTE4_BASE_URL || 'http://127.0.0.1:8787/';
+const chromeBin = process.env.CHROME_PATH || [
+  '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+  '/usr/bin/google-chrome',
+  '/usr/bin/google-chrome-stable',
+  '/usr/bin/chromium',
+  '/usr/bin/chromium-browser',
+  '/snap/bin/chromium',
+  '/snap/bin/chromium-browser',
+  `${process.env.LOCALAPPDATA || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+  `${process.env['ProgramFiles'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+  `${process.env['ProgramFiles(x86)'] || ''}\\Google\\Chrome\\Application\\chrome.exe`,
+  ...(process.env.PATH || '').split(path.delimiter).flatMap(d => (process.platform === 'win32' ? ['chrome.exe', 'chromium.exe'] : ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser']).map(n => path.join(d, n))),
+].find(p => p && existsSync(p));
+if (!chromeBin) { console.error('No Chrome/Chromium found. Set CHROME_PATH to your browser binary.'); process.exit(1); }
 const profile = mkdtempSync(path.join(tmpdir(), 'n4chrome-'));
-const chrome = spawn(process.env.CHROME_PATH || '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', ['--headless=new', '--remote-debugging-port=9377', '--user-data-dir=' + profile, '--no-first-run', '--window-size=1440,1000', 'about:blank'], {stdio: 'ignore'});
+const asRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+const chrome = spawn(chromeBin, [...(asRoot ? ['--no-sandbox'] : []), '--headless=new', '--remote-debugging-port=9377', '--user-data-dir=' + profile, '--no-first-run', '--window-size=1440,1000', 'about:blank'], {stdio: ['ignore', 'ignore', 'pipe']});
+let chromeErr = '';
+chrome.stderr.on('data', d => { chromeErr = (chromeErr + d).slice(-4000); });
+chrome.on('error', e => { console.error('Cannot launch ' + chromeBin + ': ' + e.message); process.exit(1); });
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 let target;
 for (let i = 0; i < 40 && !target; i++) { await sleep(250); try { target = (await (await fetch('http://127.0.0.1:9377/json')).json()).find(t => t.type === 'page'); } catch {} }
+if (!target) {
+  console.error('Chrome did not expose a debugger at :9377.' + (chromeErr.trim() ? '\nChrome output:\n' + chromeErr.trim().slice(-1500) : ' Check that ' + chromeBin + ' launches headless.'));
+  try { chrome.kill(); } catch {}
+  process.exit(1);
+}
 const ws = new WebSocket(target.webSocketDebuggerUrl);
 await new Promise(r => ws.onopen = r);
 let seq = 0; const waits = new Map(); const errors = [];
