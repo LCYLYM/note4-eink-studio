@@ -2,7 +2,7 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=40';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=41';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -178,16 +178,22 @@ const PROMO_VIDEO_CDN = 'https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@ma
 const PROMO_POSTER_RAW = 'https://raw.githubusercontent.com/LCYLYM/note4-eink-studio/main/docs/screenshots/note4-promo-poster.jpg';
 const PROMO_POSTER_CDN = 'https://cdn.jsdelivr.net/gh/LCYLYM/note4-eink-studio@main/docs/screenshots/note4-promo-poster.jpg';
 
+function releaseVideos(root = document) {
+  root.querySelectorAll('video').forEach(v => {
+    try { v.pause(); v.removeAttribute('src'); v.innerHTML = ''; v.load(); } catch {}
+  });
+}
+
 function promoVideoPlayerHtml(autoplay = true) {
   return `<video class="film-video" controls ${autoplay ? 'autoplay' : ''} playsinline preload="metadata" poster="${PROMO_POSTER_CDN}">
     <source src="${PROMO_VIDEO_CDN}" type="video/mp4">
-    <source src="${PROMO_VIDEO_RAW}" type="video/mp4">
+    <source src="${PROMO_VIDEO_RAW}" type="video/mp4" data-fallback-exhausted="1">
     当前浏览器不支持内嵌播放，<a href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">点此打开 GitHub 视频直链</a>。
   </video>`;
 }
 
 function openPromoVideoDialog() {
-  $$('video').forEach(v => { try { v.pause(); } catch {} });
+  releaseVideos();
   const d = $('#dialog');
   d.className = 'cinema';
   d.innerHTML = `<div class="dlg-head cinema-head">
@@ -203,10 +209,12 @@ function openPromoVideoDialog() {
     <a class="cinema-ext" href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">GitHub 直链播放 ↗</a>
   </div>`;
   if (!d.open) d.showModal();
+  if ($('#toast')?.classList.contains('show')) promoteToastTopLayer();
 }
 
 function openModal(title, html, narrow = false) {
   const d = $('#dialog');
+  releaseVideos(d);
   d.className = narrow ? 'narrow' : '';
   d.innerHTML = `<div class="dlg-head"><h2>${esc(title)}</h2><button type="button" class="dlg-close" data-act="close" aria-label="关闭">×</button></div>${html}`;
   if (!d.open) d.showModal();
@@ -499,6 +507,7 @@ async function history() {
 }
 
 async function openWork(id, known) {
+  releaseVideos();
   if (S.task && S.task.work_id !== id) {
     stopFollow();
     S.task = null;
@@ -1938,8 +1947,11 @@ const ACTS = {
       const pendingPrompt = S.aiCred?.configured ? recall('pendingPrompt') : null;
       if (pendingPrompt) {
         remember('pendingPrompt', null);
+        $('#dialog')?.close();
         await create(pendingPrompt);
+        return true;
       }
+      return false;
     }
   }),
   voiceMic: () => {
@@ -1976,12 +1988,12 @@ const ACTS = {
     tell('代码已保存并重新运行');
   },
   flash: () => showFlasher({usb, api, dialog, tell}),
-  demo: async () => (await import('./demo.js?v=23')).startDemo(),
+  demo: async () => { releaseVideos(); (await import('./demo.js?v=23')).startDemo(); },
   promoVideo: () => openPromoVideoDialog(),
   playInlineFilm: () => {
     const stage = $('#homeFilmStage');
     if (!stage) return openPromoVideoDialog();
-    $$('video').forEach(v => { try { v.pause(); } catch {} });
+    releaseVideos();
     stage.innerHTML = promoVideoPlayerHtml(true);
     stage.classList.add('playing');
   },
@@ -2134,7 +2146,7 @@ window.addEventListener('resize', () => syncClipPills());
 $('#dialog')?.addEventListener('close', () => {
   const d = $('#dialog');
   if (d?.classList.contains('cinema')) {
-    d.querySelectorAll('video').forEach(v => { try { v.pause(); v.removeAttribute('src'); v.load(); } catch {} });
+    releaseVideos(d);
     d.innerHTML = '';
     d.className = '';
   }
@@ -2145,9 +2157,17 @@ $('#dialog')?.addEventListener('click', e => {
   }
 });
 document.addEventListener('error', e => {
-  const img = e.target;
-  if (img?.tagName === 'IMG' && img.dataset?.fallback && img.src !== img.dataset.fallback) {
-    img.src = img.dataset.fallback;
+  const el = e.target;
+  if (el?.tagName === 'IMG' && el.dataset?.fallback && el.src !== el.dataset.fallback) {
+    el.src = el.dataset.fallback;
+    return;
+  }
+  if (el?.tagName === 'SOURCE' && el.dataset?.fallbackExhausted === '1') {
+    const box = el.closest('.cinema-stage, #homeFilmStage');
+    if (box) {
+      releaseVideos(box);
+      box.innerHTML = `<div class="film-fallback"><span>当前网络暂时无法直连 GitHub 视频节点</span><span><a href="${PROMO_VIDEO_CDN}" target="_blank" rel="noopener noreferrer">新窗口打开 CDN 源</a> · <a href="${PROMO_VIDEO_RAW}" target="_blank" rel="noopener noreferrer">GitHub Raw 源</a></span></div>`;
+    }
   }
 }, true);
 

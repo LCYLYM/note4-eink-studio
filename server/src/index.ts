@@ -1,6 +1,6 @@
 import {JS_TEMPLATES,galleryIndex} from './js-templates';
 import {lookupPublicApis,suggestPublicApiHint} from './public-apis';
-import {handlePublicOAuthRoute,handleAiCredRoute,getDeviceAiCredPayload,pendingDeviceAiCredRev,purgeLegacyServerAiCred,readCallerBrowserCred} from './dsh-auth';
+import {handleAiCredRoute,getDeviceAiCredPayload,pendingDeviceAiCredRev,purgeLegacyServerAiCred,readCallerBrowserCred} from './dsh-auth';
 import {decodePage,interactivePages} from './interactive';
 import {Accounts,Principal,problem} from './accounts';
 import {Budget,LIMITS} from './budget';
@@ -20,7 +20,7 @@ import protocol from '../../shared/protocol.json';
 import {digest,inspectImage,newer} from './ota';
 interface Env {PLATFORM:any;ASSETS:Fetcher;DEV_MODE?:string;API_TOKEN?:string;DEVICE_TOKENS?:string;MODEL_API_KEY?:string;MODEL_BASE_URL?:string;MODEL_NAME?:string;MODEL_THINKING?:string;MODEL_MAX_CONCURRENT?:string;MCP_GRANTS?:string;BOOTSTRAP_TOKEN?:string;APP_SEAL_KEY?:string;SSO_ISSUER?:string;SSO_CLIENT_ID?:string;SSO_KEY_ID?:string;SSO_REDIRECT_URI?:string;SSO_CLIENT_HMAC_SECRET?:string;safeFetch?:typeof fetch;modelFetch?:typeof fetch;hostMetrics?:()=>Promise<any>;modelProbe?:(model:string,transport:string)=>Promise<any>;MODEL_CANDIDATES?:string;MODEL_BACKENDS_JSON?:string}
 const enc=new TextEncoder();const id=(p:string)=>p+'_'+crypto.randomUUID();const now=()=>Date.now();const json=(v:any,status=200)=>Response.json(v,{status});const fail=(m:string,status=400):never=>{throw Object.assign(Error(m),{status});};
-export default {async fetch(r:Request,e:Env){const u=new URL(r.url);if(u.pathname.startsWith('/api/')||u.pathname==='/mcp'||u.pathname==='/oauth/callback')return e.PLATFORM.get(e.PLATFORM.idFromName('single-user-v1')).fetch(r);return e.ASSETS.fetch(r);}} satisfies ExportedHandler<Env>;
+export default {async fetch(r:Request,e:Env){const u=new URL(r.url);if(u.pathname.startsWith('/api/')||u.pathname==='/mcp')return e.PLATFORM.get(e.PLATFORM.idFromName('single-user-v1')).fetch(r);return e.ASSETS.fetch(r);}} satisfies ExportedHandler<Env>;
 export class Platform {
  ctx:DurableObjectState;env:Env;
  accounts=new Accounts(this as any);budget=new Budget(this as any);hosted=new Hosted(this);router=new ModelRouter(this);relay=new RelayHub(this);
@@ -51,7 +51,6 @@ export class Platform {
  async fetch(r:Request):Promise<Response>{let response:Response;try{response=await this.route(r);}catch(e:any){if(!e.status||new URL(r.url).pathname.startsWith('/api/device/'))console.error('NOTE4_ERR',new URL(r.url).pathname,e.status??'-',e.stack??e.message);response=json({retryable:(e.status??400)>=500||[408,429].includes(e.status),error:e.message,code:e.code??(e.status===409?'REV_CONFLICT':e.status===401?'UNAUTHORIZED':'INVALID_REQUEST')},e.status||400);}const pn=new URL(r.url).pathname;if(pn.startsWith('/api/invoke/')||pn.startsWith('/api/relay/')){response.headers.set('Access-Control-Allow-Origin','*');response.headers.set('Vary','Origin');}return response;}
  async route(r:Request):Promise<Response>{const u=new URL(r.url),p=u.pathname.split('/').filter(Boolean),method=r.method;const body=async()=>{if(Number(r.headers.get('content-length'))>1500000)fail('Body too large',413);return readJSON(r,1500000);};
  const accountResponse=await this.accounts.route(r);if(accountResponse)return accountResponse;
- const dshPublic=await handlePublicOAuthRoute(this,r);if(dshPublic)return dshPublic;
  if(p[1]!=='invoke'&&p[1]!=='relay')this.accounts.checkOrigin(r);
  const relayPublic=await this.relay.publicRoute(r);if(relayPublic)return relayPublic;
  if(p[1]==='config')return json({dev_mode:this.isDev(r),model:this.router.publicDescribe(),deployment:'local-or-configured-worker',templates:['runner@1.0.0','cards@1.0.0'],defaults:{runner:defaults(),cards:defaults('cards')}});

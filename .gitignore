@@ -17,8 +17,10 @@ firmware/sdkconfig.old
 *.key
 *.pem
 
-# Verification tool output
+# Verification tool output & video build scripts
 evidence/
+docs/video/*
+!docs/video/note4-promo.mp4
 
 # OS & logs
 .DS_Store

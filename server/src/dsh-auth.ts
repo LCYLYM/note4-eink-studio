@@ -11,15 +11,12 @@ const DSH_CLIENT_HEADERS: Record<string, string> = {
   'x-client-timezone-offset': '28800',
 };
 
-// Volatile RAM-only one-time handoff maps (NEVER persisted to SQLite/disk; auto-expire <= 180s & self-delete on first read!)
-type BridgeClaim = {owner: string; cred: any; expiresAt: number};
+// Volatile RAM-only one-time device handoff map (NEVER persisted to SQLite/disk; auto-expires <= 180s & self-deletes on first device read!)
 type DeviceDrop = {owner: string; payload: any; rev: number; expiresAt: number};
-const ramBridgeClaims = new Map<string, BridgeClaim>();
 const ramDeviceDrops = new Map<string, DeviceDrop>();
 
 function sweepEphemeral() {
   const t = Date.now();
-  for (const [k, v] of ramBridgeClaims) if (v.expiresAt <= t) ramBridgeClaims.delete(k);
   for (const [k, v] of ramDeviceDrops) if (v.expiresAt <= t) ramDeviceDrops.delete(k);
 }
 
@@ -237,47 +234,36 @@ async function completePkceExchange(platform: any, code: string, state: string):
     user: biz.user ? {name: biz.user.name || biz.user.email || biz.user.mobile_number || 'DeepSeek 用户', id: biz.user.id} : {name: 'DeepSeek 账号'},
     balance,
     rev,
+    verified_at: Date.now(),
     updated_at: Date.now(),
   };
   return {uid: pkce.owner, cred};
 }
 
-export async function handlePublicOAuthRoute(platform: any, r: Request): Promise<Response | null> {
-  const u = new URL(r.url);
-  if (u.pathname === '/oauth/callback' && r.method === 'GET') {
-    const code = u.searchParams.get('code') || '';
-    const state = u.searchParams.get('state') || '';
-    try {
-      const {uid, cred} = await completePkceExchange(platform, code, state);
-      // Store short-lived 90s claim in volatile RAM ONLY in case window.opener is null; also postMessage to same-origin opener!
-      ramBridgeClaims.set(uid + ':' + state, {owner: uid, cred, expiresAt: Date.now() + 90000});
-      const safeJson = JSON.stringify(cred).replace(/</g, '\\u003c');
-      return new Response(
-        `<!doctype html><meta charset=utf-8><title>授权成功</title><body style="font:16px system-ui;padding:40px;text-align:center"><h2>DeepSeek 账号授权成功</h2><p>凭证已保存在你本机浏览器（不写入服务器），此窗口将自动关闭。</p><script>try{var c=${safeJson};localStorage.setItem("n4_voice_cred_v2",JSON.stringify(c));window.opener?.postMessage({type:"note4_dsh_cred",cred:c},window.location.origin);setTimeout(()=>window.close(),600);}catch{}</script>`,
-        {headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}}
-      );
-    } catch (e: any) {
-      return new Response(
-        `<!doctype html><meta charset=utf-8><title>授权失败</title><body style="font:16px system-ui;padding:40px;text-align:center"><h2>授权未完成</h2><p>${String(e.message || '请返回重试').replace(/[<>&]/g, '')}</p>`,
-        {status: 400, headers: {'Content-Type': 'text/html; charset=utf-8', 'Cache-Control': 'no-store'}}
-      );
-    }
+function parseOAuthCallback(rawInput: unknown, fallbackCode: string, fallbackState: string): {code: string; state: string} {
+  const cleaned = String(rawInput ?? '').trim().replace(/^['"`<>]+|['"`<>]+$/g, '').trim();
+  if (!cleaned) return {code: fallbackCode, state: fallbackState};
+  const hit = cleaned.match(/https?:\/\/[^\s'"`<>]+/i);
+  const candidate = hit
+    ? hit[0]
+    : /^https?/i.test(cleaned)
+      ? ''
+      : cleaned.includes('?')
+        ? 'http://127.0.0.1/' + cleaned.replace(/^\/+/, '')
+        : 'http://127.0.0.1/?' + cleaned.replace(/^[/?&]+/, '');
+  if (!candidate) {
+    throw Object.assign(Error('回调链接格式无效，请粘贴完整的 http://127.0.0.1:54321/oauth/callback?code=... 网址'), {status: 400});
   }
-  if (u.pathname === '/api/ai-cred/dsh/bridge-complete' && r.method === 'POST') {
-    const b: any = await readJSON(r, 16384);
-    const state = String(b.state || '');
-    const pkce = platform.get('dsh_pkce', state);
-    if (!pkce || !b.bridge_token || pkce.bridge_token !== b.bridge_token) {
-      return Response.json({error: 'Invalid bridge token'}, {status: 403, headers: {'Access-Control-Allow-Origin': '*'}});
-    }
-    const {uid, cred} = await completePkceExchange(platform, String(b.code || ''), state);
-    ramBridgeClaims.set(uid + ':' + state, {owner: uid, cred, expiresAt: Date.now() + 90000});
-    return Response.json({ok: true, configured: true, masked: cred.masked}, {headers: {'Access-Control-Allow-Origin': '*', 'Cache-Control': 'no-store'}});
+  let parsed: URL;
+  try {
+    parsed = new URL(candidate);
+  } catch {
+    throw Object.assign(Error('回调链接格式无效，请粘贴完整的 http://127.0.0.1:54321/oauth/callback?code=... 网址'), {status: 400});
   }
-  if (u.pathname === '/api/ai-cred/dsh/bridge-complete' && r.method === 'OPTIONS') {
-    return new Response(null, {status: 204, headers: {'Access-Control-Allow-Origin': '*', 'Access-Control-Allow-Methods': 'POST, OPTIONS', 'Access-Control-Allow-Headers': 'Content-Type'}});
-  }
-  return null;
+  return {
+    code: (parsed.searchParams.get('code') || fallbackCode).trim(),
+    state: (parsed.searchParams.get('state') || fallbackState).trim(),
+  };
 }
 
 export async function handleAiCredRoute(platform: any, r: Request, uid: string): Promise<Response | null> {
@@ -352,14 +338,14 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
   }
 
   if (sub === '/dsh/init' && method === 'POST') {
+    try {
+      platform.ctx.storage.sql.exec("DELETE FROM records WHERE type='dsh_pkce' AND json_extract(data,'$.expires_at') < ?", Date.now());
+    } catch {}
     const verifier = b64url(crypto.getRandomValues(new Uint8Array(32)));
     const challenge = b64url(new Uint8Array(await crypto.subtle.digest('SHA-256', enc.encode(verifier))));
     const state = b64url(crypto.getRandomValues(new Uint8Array(18)));
-    const bridgeToken = b64url(crypto.getRandomValues(new Uint8Array(24)));
     const deviceId = crypto.randomUUID();
-    const isLocal = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
-    const cbPort = isLocal ? (u.port || '8787') : '54321';
-    const redirectUri = `http://127.0.0.1:${cbPort}/oauth/callback`;
+    const redirectUri = 'http://127.0.0.1:54321/oauth/callback';
 
     const res = await extFetch(platform, DSH_PLATFORM + '/auth-api/v0/dsh/auth_init', {
       method: 'POST',
@@ -384,34 +370,15 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
       code_verifier: verifier,
       redirect_uri: redirectUri,
       device_id: deviceId,
-      bridge_token: bridgeToken,
       expires_at: Date.now() + 300000,
     }, state);
-
-    const completeEndpoint = `${u.origin}/api/ai-cred/dsh/bridge-complete`;
-    const bridgeCmd = isLocal
-      ? ''
-      : `node -e 'const h=require("http"),s=h.createServer(async(q,r)=>{const u=new URL(q.url,"http://127.0.0.1:54321");if(u.pathname!=="/oauth/callback"){r.end();return;}const x=await fetch(${JSON.stringify(completeEndpoint)},{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify({code:u.searchParams.get("code"),state:u.searchParams.get("state"),bridge_token:${JSON.stringify(bridgeToken)}})});r.setHeader("content-type","text/html;charset=utf-8");r.end(x.ok?"<h2>NOTE4 授权已完成，可回网页继续</h2>":"<h2>授权失败</h2>");s.close();}).listen(54321,"127.0.0.1",()=>console.log("请在浏览器完成登录:",${JSON.stringify(biz.authorize_url)}))'`;
 
     return Response.json({
       state,
       authorize_url: biz.authorize_url,
       redirect_uri: redirectUri,
-      is_local: isLocal,
-      bridge_cmd: bridgeCmd,
       expires_in: biz.expires_in ?? 300,
     }, {headers: {'Cache-Control': 'no-store'}});
-  }
-
-  if (sub === '/dsh/claim' && method === 'POST') {
-    const b: any = await readJSON(r, 4096);
-    const key = uid + ':' + String(b.state || '');
-    const hit = ramBridgeClaims.get(key);
-    if (!hit || hit.owner !== uid || hit.expiresAt <= Date.now()) {
-      return Response.json({ready: false}, {headers: {'Cache-Control': 'no-store'}});
-    }
-    ramBridgeClaims.delete(key); // Single-use claim, wiped from RAM immediately!
-    return Response.json({ready: true, cred: hit.cred}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/dsh/complete' && method === 'POST') {
@@ -419,10 +386,7 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     let code = String(b.code || '').trim();
     let state = String(b.state || '').trim();
     if (b.callback_url) {
-      const raw = String(b.callback_url).trim();
-      const parsed = new URL(raw.startsWith('http') ? raw : 'http://127.0.0.1/' + raw.replace(/^\/+/, ''));
-      code = parsed.searchParams.get('code') || code;
-      state = parsed.searchParams.get('state') || state;
+      ({code, state} = parseOAuthCallback(b.callback_url, code, state));
     }
     const pkce = platform.get('dsh_pkce', state);
     if (!pkce || pkce.owner !== uid) throw Object.assign(Error('未找到匹配的授权请求，请重新发起授权'), {status: 400});
@@ -462,6 +426,7 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
       user: null,
       balance: null,
       rev,
+      verified_at: Date.now(),
       updated_at: Date.now(),
     };
     return Response.json({ok: true, configured: true, cred}, {headers: {'Cache-Control': 'no-store'}});

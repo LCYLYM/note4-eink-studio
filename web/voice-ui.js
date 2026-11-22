@@ -136,8 +136,11 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   let revokedNotice = false;
   if (local) {
     try {
-      // Single explicit liveness check when user opens the account dialog (short-circuits /models if revoked)
-      const fresh = await api('/ai-cred/status?refresh=1').catch(err => (err?.status === 401 || err?.code === 'AI_CRED_REVOKED' ? {revoked: true} : null));
+      // Single explicit liveness check when user opens the account dialog (skip if verified within the last 15s)
+      const recentlyVerified = Date.now() - (local.verified_at || 0) < 15000;
+      const fresh = recentlyVerified
+        ? {configured: true, balance: local.balance}
+        : await api('/ai-cred/status?refresh=1').catch(err => (err?.status === 401 || err?.code === 'AI_CRED_REVOKED' ? {revoked: true} : null));
       if (fresh?.revoked) {
         clearLocalVoiceCred();
         if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
@@ -256,11 +259,15 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
 
   const finish = async (msg, newCred) => {
     if (newCred) {
-      saveLocalVoiceCred(newCred);
+      saveLocalVoiceCred({...newCred, verified_at: newCred.verified_at || Date.now()});
       if (usb?.port) await syncVoiceCredOverUsb(usb).catch(() => {});
     }
     tell(msg);
-    await onUpdated?.();
+    const consumed = await onUpdated?.();
+    if (consumed) {
+      document.getElementById('dialog')?.close();
+      return;
+    }
     openVoiceCredDialog({api, dialog, tell, usb, onUpdated});
   };
 
