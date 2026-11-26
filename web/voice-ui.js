@@ -62,7 +62,7 @@ export async function syncVoiceCredOverUsb(usb) {
     token: c.token,
     base_url: c.base_url || 'https://api.deepseek.com',
     model: c.model || 'deepseek-flash',
-    rev: c.rev || Math.floor(Date.now() / 1000),
+    rev: Math.max(Number(c.rev) || 0, Math.floor(Date.now() / 1000)),
   }, 'set_ai_cred');
   return true;
 }
@@ -401,7 +401,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   document.getElementById('vcModelSelect')?.addEventListener('change', async e => {
     const chosen = e.currentTarget.value || 'deepseek-flash';
     if (!local) return;
-    local = saveLocalVoiceCred({...local, model: chosen, rev: Math.floor(Date.now() / 1000)});
+    local = saveLocalVoiceCred({...local, model: chosen, rev: Math.max(Number(local.rev) || 0, Math.floor(Date.now() / 1000))});
     if (usb?.port) await syncVoiceCredOverUsb(usb).catch(() => {});
     await onUpdated?.();
     tell(`已切换个人模型为 ${chosen}`);
