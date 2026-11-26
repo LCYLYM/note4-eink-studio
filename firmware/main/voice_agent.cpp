@@ -1168,7 +1168,7 @@ const char* voice_phase_name() {
 }
 
 void voice_sync_cred_if_needed(int64_t server_rev) {
-    if (server_rev <= 0 || server_rev == voice_cred_rev()) return;
+    if (server_rev <= voice_cred_rev()) return; // monotonic revs: never act on stale/duplicate instructions (a lower rev must not downgrade-wipe a newer credential)
     std::string out;
     if (device_http("/api/device/ai-cred", "", out) != 200) return;
     cJSON* j = cJSON_Parse(out.c_str());
