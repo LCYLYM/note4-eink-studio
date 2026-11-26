@@ -2,7 +2,7 @@
 import {Note4Vm} from './vm.js?v=27';
 import {Note4USB} from './usb.js?v=23';
 import {showFlasher, flashApp, pickPort} from './flasher.js?v=23';
-import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=42';
+import {openVoiceCredDialog, runSimulatorVoiceTurn, setSimLed, readLocalVoiceCred, clearLocalVoiceCred, verifyLocalVoiceCred, createSimHardwareVoice, interruptSimulatorVoice, voiceCredHeaders, syncVoiceCredOverUsb} from './voice-ui.js?v=43';
 
 const $ = s => document.querySelector(s);
 const $$ = s => [...document.querySelectorAll(s)];
@@ -207,7 +207,7 @@ function openPromoVideoDialog() {
   d.className = 'cinema';
   d.innerHTML = `<div class="dlg-head cinema-head">
     <div class="cinema-title">
-      <span class="film-kicker mono">FILM · 00:46 · 1080P</span>
+      <span class="film-kicker mono">FILM · 01:02 · 1080P</span>
       <h2>NOTE4 墨水屏对话创作台 · 实机与语音全链路演示</h2>
     </div>
     <button type="button" class="dlg-close cinema-close" data-act="close" aria-label="关闭">×</button>
@@ -846,7 +846,8 @@ async function connect() {
   try {
     if (!usb.port) await usb.connect();
     const identity = await again(() => usb.command({op: 'usb_identity'}, 'identity', 3000)), status = await usb.status();
-    usb.device = await api('/usb/attach', 'POST', {identity, status});
+    const attached = usb.device = await api('/usb/attach', 'POST', {identity, status});
+    if (attached?.cred_clear_rev) await usb.command({op: 'set_ai_cred', clear: true, rev: attached.cred_clear_rev}, 'set_ai_cred').catch(() => {});
     usb.firmware = status.firmware;
     renderTopbar();
     renderLive();
@@ -859,7 +860,10 @@ async function connect() {
     throw e;
   }
 }
-const device = () => S.devices.find(d => d.wifi) ?? S.devices[0];
+const device = () => {
+  const wanted = recall('activeDeviceId');
+  return (wanted && S.devices.find(d => d.id === wanted)) || S.devices.find(d => d.wifi) || S.devices[0];
+};
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 const again = async f => { for (let i = 0; ; i++) try { return await f(); } catch (e) { if (i >= 3) throw e; await sleep(1000); } };
 async function loadDevices() { S.devices = (await api('/devices')).devices; }
@@ -878,14 +882,23 @@ function deviceDialog() {
   const d = device();
   const form = `<form data-form="device" class="wifi"><label>2.4GHz WiFi 名称<input id="ssid" required maxlength="32" autocomplete="off" value="${esc(recall('ssid') ?? '')}"></label><label>WiFi 密码<input id="wifipw" type="password" maxlength="64" autocomplete="off" value="${esc(recall('wifipw') ?? '')}"></label><label>自动同步频率<select id="syncMin">${SYNC.map(([m, t]) => `<option value="${m}"${m === (recall('syncMin') ?? 60) ? ' selected' : ''}>${t}</option>`).join('')}</select></label><button class="btn solid" id="setupBtn">连接并配网</button><ol class="steps" id="setupSteps" hidden>${SETUP_STEPS.map(t => `<li>${t}</li>`).join('')}</ol><progress id="setupBar" max="100" value="0" hidden></progress><p id="setupState" class="small" role="status"></p></form><p class="small">仅首次配网需要插一次 USB 线。WiFi 密码只保存在浏览器和硬件本地，不上传云端。</p>`;
   const how = `<ol class="how"><li>用支持数据传输的 USB-C 线连接 NOTE4 与电脑</li><li>填写 2.4GHz WiFi 名称和密码，点击「连接并配网」</li><li>在弹窗中选择 <code>USB JTAG/serial debug unit</code></li></ol>`;
+  const firstFlashTip = `<div class="notice-bar" style="margin-top:10px"><span class="small">全新出厂设备首次接入，请先备份原厂固件并完成首次刷机，再进行配网。</span><button type="button" class="btn sm soft" data-act="flash">备份与首次刷机</button></div>`;
+  const devRows = S.devices.map(item => {
+    const active = d && item.id === d.id;
+    const tag = item.id.slice(-8);
+    return `<div class="kv-row" style="gap:8px;align-items:center;flex-wrap:wrap">
+      <div><strong class="mono" style="font-size:12.5px">NOTE4-${esc(tag)}</strong>${active && S.devices.length > 1 ? ' <span class="badge">当前</span>' : ''}<div class="small">${item.wifi ? esc(ago(item.last_seen)) + '同步 · ' + esc(syncName(item.sync_minutes)) : '仅 USB'} · 固件 ${esc(item.firmware?.version ?? '未知')}</div></div>
+      <div class="row" style="gap:6px;margin-left:auto">${!active && S.devices.length > 1 ? `<button type="button" class="btn sm soft" data-act="selectDevice" data-id="${esc(item.id)}">切换</button>` : ''}<button type="button" class="del" data-act="unbindDevice" data-id="${esc(item.id)}">解绑</button></div>
+    </div>`;
+  }).join('');
   if (S.config?.dev_mode) {
     const usbCard = usb.device
       ? `<div class="notice-bar accent"><div><div style="font-weight:600;font-size:13.5px">USB 设备已连接</div><div class="small">固件 ${esc(usb.firmware || '已就绪')} · 可在应用页直接点击「写入设备」</div></div><button type="button" class="btn sm soft" data-act="disconnect">断开连接</button></div>`
       : `<div style="display:flex;flex-direction:column;gap:10px"><ol class="how"><li>用可传数据的 USB-C 线将 NOTE4 连到电脑</li><li>点击下方按钮，在串口弹窗选择 <code>USB JTAG/serial debug unit</code></li><li>连接后在任意应用页点「写入设备」即可上屏</li></ol><div class="row"><button type="button" class="btn solid" data-act="connect">通过 USB 连接设备</button><button type="button" class="btn soft" data-act="flash">首次刷机与备份</button></div></div>`;
-    return openModal('连接 NOTE4 设备', `<div style="display:flex;flex-direction:column;gap:12px">${usbCard}<details style="padding-top:8px;border-top:1px solid var(--line)"><summary style="cursor:pointer;font-size:13px;font-weight:500">高级：WiFi 配网或刷入最新系统</summary><div style="margin-top:10px">${how}${form}<p style="margin-top:10px"><button class="link under" data-act="flash">打开固件备份与首次安装</button></p></div></details></div>`, true);
+    return openModal('连接 NOTE4 设备', `<div style="display:flex;flex-direction:column;gap:12px">${usbCard}${devRows ? `<div style="display:flex;flex-direction:column;gap:8px;padding-top:8px;border-top:1px solid var(--line)">${devRows}</div>` : ''}<details style="padding-top:8px;border-top:1px solid var(--line)"><summary style="cursor:pointer;font-size:13px;font-weight:500">高级：WiFi 配网或刷入最新系统</summary><div style="margin-top:10px">${how}${form}<p style="margin-top:10px"><button class="link under" data-act="flash">打开固件备份与首次安装</button></p></div></details></div>`, true);
   }
-  if (!d?.wifi) return openModal('添加设备', `${how}${form}<p style="margin-top:10px"><button class="link under" data-act="flash">高级：固件备份与首次刷机</button></p>`, true);
-  openModal('我的设备', `<div class="kv-row"><span>状态</span><span>${esc(ago(d.last_seen))}同步 · ${esc(syncName(d.sync_minutes))} · 固件 ${esc(d.firmware?.version ?? '未知')}</span></div><p class="small" style="margin-top:8px">发布新应用或推送新数据后，设备会在下次同步时更新；也可长按设备音量加选「立即检查更新」。</p><details style="margin-top:10px"><summary style="cursor:pointer;font-weight:500">通过 USB 修改 WiFi 或升级固件</summary>${how}${form}</details><p style="margin-top:10px"><button class="link under" data-act="flash">高级：固件备份与首次刷机</button></p>`, true);
+  if (!d?.wifi) return openModal('添加设备', `${devRows ? `<div style="display:flex;flex-direction:column;gap:8px;margin-bottom:10px">${devRows}</div>` : ''}${how}${form}${firstFlashTip}`, true);
+  openModal('我的设备', `<div style="display:flex;flex-direction:column;gap:8px">${devRows}</div><p class="small" style="margin-top:8px">发布新应用或推送新数据后，设备会在下次同步时更新；也可长按设备音量加选「立即检查更新」。如需转交他人或换账号绑定，请先点击上方「解绑」。</p><details style="margin-top:10px"><summary style="cursor:pointer;font-weight:500">通过 USB 修改 WiFi、添加新设备或升级固件</summary>${how}${form}</details><p style="margin-top:10px"><button class="link under" data-act="flash">高级：固件备份与首次刷机</button></p>`, true);
 }
 
 async function ensureFirmware(say) {
@@ -928,8 +941,18 @@ async function setupDevice() {
     await ensureFirmware(report);
     const identity = await again(() => usb.command({op: 'usb_identity'}, 'identity', 3000)), status = await usb.status();
     const d = usb.device = await api('/usb/attach', 'POST', {identity, status});
+    let cred_cleared = !d?.cred_clear_rev;
+    if (d?.cred_clear_rev) {
+      if (status?.ai_cred_kind !== undefined) {
+        await usb.command({op: 'set_ai_cred', clear: true, rev: d.cred_clear_rev}, 'set_ai_cred');
+        cred_cleared = true;
+      } else {
+        await usb.command({op: 'set_ai_cred', clear: true, rev: d.cred_clear_rev}, 'set_ai_cred').catch(() => {});
+        cred_cleared = true;
+      }
+    }
     report('正在写入 WiFi 信息...', 88);
-    const grant = await api('/usb/wifi', 'POST', {identity});
+    const grant = await api('/usb/wifi', 'POST', {identity, cred_cleared});
     const reply = await usb.command({op: 'provision', ssid, password, base_url: grant.base_url, device_token: grant.device_token, device_id: grant.device_id, sync_minutes}, 'reply');
     if (!reply.provisioned) throw Error('设备未接受配网参数');
     remember('ssid', ssid); remember('syncMin', sync_minutes); remember('wifipw', password);
@@ -1243,10 +1266,10 @@ function homeHtml() {
       </div>
     </section>
 
-    <section class="film-card" aria-label="46 秒实机与工作台演示短片">
+    <section class="film-card" aria-label="62 秒实机与工作台演示短片">
       <div class="film-copy">
-        <div class="film-kicker mono"><span class="film-dot" aria-hidden="true"></span>SHORT FILM · 00:46 · 1080P</div>
-        <h2>46 秒看懂：从一句话到桌面墨水屏开口回应</h2>
+        <div class="film-kicker mono"><span class="film-dot" aria-hidden="true"></span>SHORT FILM · 01:02 · 1080P</div>
+        <h2>62 秒看懂：从一句话到桌面墨水屏开口回应</h2>
         <p class="small">完整记录对话改码、同源 WASM 零越界核验、16 灰液态玻璃刷新、6,917 全字库排版与机身三键按住说话闭环。视频由 GitHub 直链按需流式加载。</p>
         <div class="film-acts">
           <button type="button" class="btn sm solid" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>剧场模式播放</button>
@@ -1255,10 +1278,10 @@ function homeHtml() {
         </div>
       </div>
       <div class="film-stage" id="homeFilmStage">
-        <button type="button" class="film-poster-btn" data-act="playInlineFilm" aria-label="播放 46 秒实机演示有声短片">
-          <img src="${PROMO_POSTER_CDN}" data-fallback="${PROMO_POSTER_RAW}" alt="NOTE4 46 秒实机演示封面" loading="lazy" width="960" height="540">
+        <button type="button" class="film-poster-btn" data-act="playInlineFilm" aria-label="播放 62 秒实机演示有声短片">
+          <img src="${PROMO_POSTER_CDN}" data-fallback="${PROMO_POSTER_RAW}" alt="NOTE4 62 秒实机演示封面" loading="lazy" width="960" height="540">
           <span class="film-shade" aria-hidden="true"></span>
-          <span class="film-play-pill" aria-hidden="true"><span class="play-tri"></span><span>播放有声正片 · 00:46</span></span>
+          <span class="film-play-pill" aria-hidden="true"><span class="play-tri"></span><span>播放有声正片 · 01:02</span></span>
         </button>
       </div>
     </section>
@@ -1748,8 +1771,45 @@ const ACTS = {
   disconnect: async () => { await usb.disconnect(); renderTopbar(); renderLive(); if ($('#dialog')?.open) deviceDialog(); tell('已断开 USB 连接'); },
   push,
   device: () => deviceDialog(),
+  selectDevice: b => {
+    if (setupBusy()) return tell('正在配网或写入固件，请等待完成后再操作');
+    const id = b.dataset.id;
+    if (!id) return;
+    remember('activeDeviceId', id);
+    renderTopbar();
+    renderLive();
+    if ($('#dialog')?.open) deviceDialog();
+    tell('已切换当前发布设备');
+  },
+  unbindDevice: async b => {
+    if (setupBusy()) return tell('正在配网或写入固件，请等待完成后再操作');
+    const id = b.dataset.id;
+    if (!id) return;
+    if (!window.confirm('解绑后其他账号可重新绑定该设备，并将自动清除设备上的个人语音凭证。确定解绑吗？')) return;
+    const res = await api(`/devices/${encodeURIComponent(id)}/unbind`, 'POST', {});
+    if (usb.device?.id === id && usb.port) {
+      await usb.command({op: 'set_ai_cred', clear: true, rev: res?.cred_clear_rev || Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+      await usb.disconnect().catch(() => {});
+    }
+    if (recall('activeDeviceId') === id) { try { localStorage.removeItem('note4.activeDeviceId'); } catch {} }
+    await loadDevices();
+    renderTopbar();
+    renderLive();
+    if ($('#dialog')?.open) deviceDialog();
+    tell('设备已解绑，现可交由其他账号重新绑定');
+  },
   modelCfg: () => modelDialog(false),
-  logout: async () => { await api('/auth/logout', 'POST', {}); location.href = '/'; },
+  logout: async () => {
+    clearLocalVoiceCred();
+    try {
+      localStorage.removeItem('note4.wifipw');
+      localStorage.removeItem('note4.written');
+      localStorage.removeItem('note4.activeDeviceId');
+      localStorage.removeItem('note4.pendingPrompt');
+    } catch {}
+    await api('/auth/logout', 'POST', {}).catch(() => {});
+    location.href = '/';
+  },
   close: () => {
     if (setupBusy()) return tell('正在配网或写入固件，请等待完成后再关闭');
     $('#dialog').close();
@@ -2053,7 +2113,10 @@ const ACTS = {
     paint();
     tell('代码已保存并重新运行');
   },
-  flash: () => showFlasher({usb, api, dialog, tell}),
+  flash: () => {
+    if (setupBusy()) return tell('配网进行中，请等待当前步骤完成');
+    return showFlasher({usb, api, dialog, tell});
+  },
   demo: async () => { releaseVideos(); (await import('./demo.js?v=23')).startDemo(); },
   promoVideo: () => openPromoVideoDialog(),
   playInlineFilm: () => {
@@ -2296,7 +2359,7 @@ function inkArt() {
 }
 function loginPage() {
   const q = new URLSearchParams(location.search).get('login_error');
-  $('#root').innerHTML = `<main class="lg"><section class="lg-copy"><strong class="brand-btn"><span class="brand-mark">N4</span>NOTE4 创作台</strong><div class="lg-mid"><div class="lg-num num"><b>64</b><i>KB</i><span>装下一整块桌面墨水屏</span></div><h1>说一句话，给墨水屏做个小应用。</h1><p>番茄钟、天气看板、电脑定时同步桌贴、端侧语音管家。网页里先试玩，发布后断网也能常显。</p>${q ? `<p class="err">${esc(q)}</p>` : ''}<div class="lg-go"><a class="btn solid" href="/api/auth/sso">微信登录</a><button type="button" class="btn soft" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>46 秒实机短片</button><button type="button" class="btn" data-act="demo">1 分钟演示</button></div></div></section><figure class="lg-art">${inkArt()}</figure></main>`;
+  $('#root').innerHTML = `<main class="lg"><section class="lg-copy"><strong class="brand-btn"><span class="brand-mark">N4</span>NOTE4 创作台</strong><div class="lg-mid"><div class="lg-num num"><b>64</b><i>KB</i><span>装下一整块桌面墨水屏</span></div><h1>说一句话，给墨水屏做个小应用。</h1><p>番茄钟、天气看板、电脑定时同步桌贴、端侧语音管家。网页里先试玩，发布后断网也能常显。</p>${q ? `<p class="err">${esc(q)}</p>` : ''}<div class="lg-go"><a class="btn solid" href="/api/auth/sso">微信登录</a><button type="button" class="btn soft" data-act="promoVideo"><span class="play-tri" aria-hidden="true"></span>62 秒实机短片</button><button type="button" class="btn" data-act="demo">1 分钟演示</button></div></div></section><figure class="lg-art">${inkArt()}</figure></main>`;
 }
 
 let lastFocusSync = 0, lastCredCheck = 0;

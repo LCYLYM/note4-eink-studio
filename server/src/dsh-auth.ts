@@ -11,7 +11,7 @@ const DSH_CLIENT_HEADERS: Record<string, string> = {
   'x-client-timezone-offset': '28800',
 };
 
-// Volatile RAM-only one-time device handoff map (NEVER persisted to SQLite/disk; auto-expires <= 180s & self-deletes on first device read!)
+// Volatile RAM-only one-time device handoff map (NEVER persisted to SQLite/disk; auto-expires <= 3600s & self-deletes on first device read!)
 type DeviceDrop = {owner: string; payload: any; rev: number; expiresAt: number};
 const ramDeviceDrops = new Map<string, DeviceDrop>();
 
@@ -177,17 +177,22 @@ export function readCallerBrowserCred(r: Request, allowLocalHttp = false) {
   return {kind, token, base_url, model};
 }
 
-export function pendingDeviceAiCredRev(deviceId: string, deviceOwner?: string): number {
+export function pendingDeviceAiCredRev(deviceId: string, deviceOwner?: string, credClearRev = 0): number {
   sweepEphemeral();
-  if (!deviceOwner) return 0;
+  if (!deviceOwner) return credClearRev > 0 ? credClearRev : 0;
   const drop = ramDeviceDrops.get(deviceId);
   return drop && drop.owner === deviceOwner ? drop.rev : 0;
 }
 
 /** One-time volatile RAM delivery bound strictly to (deviceId, deviceOwner); immediately wiped on read! */
-export async function getDeviceAiCredPayload(_platform: any, deviceOwner: string, deviceId?: string): Promise<any> {
+export async function getDeviceAiCredPayload(_platform: any, deviceOwner?: string, deviceId?: string, credClearRev = 0): Promise<any> {
   sweepEphemeral();
-  if (!deviceId || !deviceOwner) return {rev: 0, cleared: true};
+  if (!deviceId) return {rev: 0, cleared: true};
+  if (!deviceOwner) {
+    // Keep cred_clear_rev until a new owner binds: firmware voice_sync_cred_if_needed() skips idempotently once rev matches,
+    // so transient HTTP drops during unbind wipe will cleanly retry on the next hello.
+    return {rev: credClearRev > 0 ? credClearRev : 0, cleared: true};
+  }
   const drop = ramDeviceDrops.get(deviceId);
   if (!drop || drop.owner !== deviceOwner) return {rev: 0, cleared: true};
   ramDeviceDrops.delete(deviceId); // Self-destruct immediately on single device read!
@@ -447,7 +452,7 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
     }
     const rev = Math.floor(Date.now() / 1000);
     for (const d of platform.owned('device', uid)) {
-      ramDeviceDrops.set(d.id, {owner: uid, rev, payload: {rev, cleared: true}, expiresAt: Date.now() + 180000});
+      ramDeviceDrops.set(d.id, {owner: uid, rev, payload: {rev, cleared: true}, expiresAt: Date.now() + 3600000});
     }
     return Response.json({ok: true, configured: false, rev}, {headers: {'Cache-Control': 'no-store'}});
   }
@@ -462,10 +467,10 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
         owner: uid,
         rev,
         payload: {rev, cleared: false, kind: caller.kind, token: caller.token, base_url: caller.base_url, model: caller.model},
-        expiresAt: Date.now() + 180000,
+        expiresAt: Date.now() + 3600000,
       });
     }
-    return Response.json({ok: true, rev, devices: ownedDevs.length, ttl_seconds: 180}, {headers: {'Cache-Control': 'no-store'}});
+    return Response.json({ok: true, rev, devices: ownedDevs.length, ttl_seconds: 3600}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/sim-step' && method === 'POST') {

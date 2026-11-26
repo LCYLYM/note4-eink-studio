@@ -21,6 +21,8 @@ type Backend = {
   max_output_tokens: number;
   enabled?: boolean;
   thinking?: string;
+  api_key?: string;
+  base_url?: string;
 };
 
 export type StreamDelta = {
@@ -237,6 +239,8 @@ export class ModelRouter {
   active = 0;
   queue: Array<any> = [];
   cursor = 0;
+  private probing = new Map<string, symbol>();
+  private healthEpoch = 0;
 
   constructor(private s: any) {}
 
@@ -257,30 +261,102 @@ export class ModelRouter {
     return String(this.s.env.MODEL_API_KEY || this.runtime()?.api_key || '').trim();
   }
 
+  private normalizeBackends(raw: any[]): Backend[] {
+    const out: Backend[] = [];
+    const seen = new Set<string>();
+    for (let i = 0; i < raw.length && out.length < 12; i++) {
+      const b = raw[i];
+      if (!b || typeof b !== 'object' || b.enabled === false) continue;
+      const model = String(b.model ?? '').trim();
+      if (!model) continue;
+      let id = String(b.id ?? ('backend_' + i)).trim() || ('backend_' + i);
+      if (seen.has(id)) id = `${id}_${i}`;
+      seen.add(id);
+      const ctx = Number.isInteger(b.context_tokens) && b.context_tokens >= 8192
+        ? Math.min(1048576, b.context_tokens)
+        : 131072;
+      const maxOut = Number.isInteger(b.max_output_tokens) && b.max_output_tokens >= 256
+        ? Math.min(ctx, b.max_output_tokens)
+        : Math.min(ctx, 16384);
+      out.push({
+        id,
+        model,
+        context_tokens: ctx,
+        max_output_tokens: maxOut,
+        enabled: true,
+        ...(b.thinking === 'disabled' || b.thinking === 'omit' ? {thinking: b.thinking} : {}),
+        ...(typeof b.base_url === 'string' && b.base_url.trim() ? {base_url: b.base_url.trim()} : {}),
+        ...(typeof b.api_key === 'string' && b.api_key.trim() ? {api_key: b.api_key.trim()} : {}),
+      });
+    }
+    return out;
+  }
+
   backends(): Backend[] {
     const saved = this.s.get('model_config', 'auto')?.backends;
-    if (saved) return saved.filter((b: Backend) => b.enabled !== false);
+    if (Array.isArray(saved)) return this.normalizeBackends(saved);
     if (this.s.env.MODEL_BACKENDS_JSON) {
-      return JSON.parse(this.s.env.MODEL_BACKENDS_JSON).filter((b: Backend) => b.enabled !== false);
+      try {
+        const parsed = JSON.parse(this.s.env.MODEL_BACKENDS_JSON);
+        return Array.isArray(parsed) ? this.normalizeBackends(parsed) : [];
+      } catch (e: any) {
+        console.error('NOTE4_BACKENDS_JSON_INVALID', String(e?.message ?? e).replace(/sk-[a-zA-Z0-9_-]+/g, '[redacted]').slice(0, 160));
+        return [];
+      }
     }
     const rtModel = this.runtime()?.model;
     const names = (this.s.env.MODEL_CANDIDATES || this.s.env.MODEL_NAME || rtModel || '')
       .split(',')
       .map((x: string) => x.trim())
       .filter((x: string) => x && x !== 'auto');
-    return names.map((model: string, i: number) => ({
-      id: 'backend_' + i,
-      model,
-      context_tokens: 131072,
-      max_output_tokens: 16384,
-    }));
+    return this.normalizeBackends(
+      names.map((model: string, i: number) => ({
+        id: 'backend_' + i,
+        model,
+        context_tokens: 131072,
+        max_output_tokens: 16384,
+      }))
+    );
+  }
+
+  private backendKey(b: Backend): string {
+    return String(b.api_key || this.apiKey() || '').trim();
+  }
+
+  private backendBase(b: Backend): string {
+    return String(b.base_url || this.baseUrl() || '').trim();
+  }
+
+  private normalizeBase(raw: string, forceV1IfMissing: boolean): string {
+    const clean = raw.trim().replace(/\/+$/, '');
+    if (!clean) return '';
+    if (clean.endsWith('/v1') || clean.endsWith('/chat/completions')) return clean;
+    if (forceV1IfMissing) return clean + '/v1';
+    try {
+      if (new URL(clean).pathname === '/') return clean + '/v1';
+    } catch {}
+    return clean;
+  }
+
+  adminTarget(model?: string): {base: string; key: string} {
+    const list = this.backends();
+    const hit = (model ? list.find(b => b.model === model) : undefined) ?? list[0];
+    const rawBase = (hit ? this.backendBase(hit) : '') || this.baseUrl();
+    const key = (hit ? this.backendKey(hit) : '') || this.apiKey();
+    return {base: this.normalizeBase(rawBase, false), key};
+  }
+
+  private routingMode(): 'priority' | 'round_robin' {
+    return String(this.s.env.MODEL_ROUTING ?? '').trim().toLowerCase() === 'round_robin' ? 'round_robin' : 'priority';
   }
 
   configured() {
-    return !!(this.apiKey() && this.baseUrl() && this.backends().length);
+    return this.backends().some(b => !!(this.backendKey(b) && this.backendBase(b)));
   }
 
   resetHealth() {
+    this.healthEpoch++;
+    this.probing.clear();
     this.s.ctx.storage.sql.exec("DELETE FROM records WHERE type IN ('model_health','model_sticky')");
   }
 
@@ -295,18 +371,40 @@ export class ModelRouter {
 
   describe() {
     const rt = this.runtime();
+    const savedBackends = this.s.get('model_config', 'auto')?.backends;
+    const nowMs = Date.now();
     return {
       name: 'auto',
       configured: this.configured(),
-      source: this.s.env.MODEL_API_KEY ? 'env' : rt?.api_key ? 'runtime' : 'none',
+      routing: this.routingMode(),
+      source: Array.isArray(savedBackends) && savedBackends.length
+        ? 'saved_backends'
+        : this.s.env.MODEL_BACKENDS_JSON
+          ? 'env_backends'
+          : this.s.env.MODEL_API_KEY
+            ? 'env'
+            : rt?.api_key
+              ? 'runtime'
+              : 'none',
       base_url: this.baseUrl() || null,
-      backends: this.backends().map(b => ({
-        id: b.id,
-        model: b.model,
-        context_tokens: b.context_tokens,
-        max_output_tokens: b.max_output_tokens,
-        health: this.s.get('model_health', b.id) ?? null,
-      })),
+      backends: this.backends().map(b => {
+        const health = this.s.get('model_health', b.id) ?? null;
+        const state = !health || (health.failures ?? 0) <= 0
+          ? 'closed'
+          : (health.retry_at ?? 0) > nowMs
+            ? 'open'
+            : 'half_open';
+        return {
+          id: b.id,
+          model: b.model,
+          base_url: this.backendBase(b) || null,
+          has_api_key: !!b.api_key,
+          context_tokens: b.context_tokens,
+          max_output_tokens: b.max_output_tokens,
+          state,
+          health,
+        };
+      }),
       limits: AGENT_LIMITS,
     };
   }
@@ -356,31 +454,20 @@ export class ModelRouter {
     const meter = {known_tokens: 0, cached_tokens: 0, usage_unknown: false, request_attempts: 0};
     try {
       const devMode = this.s.env.DEV_MODE === 'true';
-      let rawBase: string;
+      let userFixedBase = '';
       if (userRuntime) {
         if (userRuntime.kind === 'dsh_token') {
-          rawBase = 'https://api.deepseek.com/v1';
+          userFixedBase = 'https://api.deepseek.com/v1';
         } else {
           const safeBase = sanitizeUserBaseUrl(userRuntime.base_url, devMode);
           if (!safeBase) problem('个人模型接口地址无效或不允许访问内网地址', 400);
-          rawBase = safeBase;
+          userFixedBase = safeBase;
         }
-      } else {
-        rawBase = this.baseUrl();
+        if (userFixedBase.startsWith('http://') && !devMode) problem('生产环境模型接口必须使用 HTTPS', 400);
+        if (userRuntime.kind === 'api_key' && !devMode && !this.s.env.safeFetch) {
+          problem('出站安全网关未就绪', 500);
+        }
       }
-      const cleanBase = rawBase.replace(/\/+$/, '');
-      const base = userRuntime && !cleanBase.endsWith('/v1') && !cleanBase.endsWith('/chat/completions') ? cleanBase + '/v1' : cleanBase;
-      const key = userRuntime ? userRuntime.token : this.apiKey();
-      const isHttp = base.startsWith('http://');
-      if (isHttp && !devMode) problem('生产环境模型接口必须使用 HTTPS', 400);
-      if (userRuntime && userRuntime.kind === 'api_key' && !devMode && !this.s.env.safeFetch) {
-        problem('出站安全网关未就绪', 500);
-      }
-      const doFetch = isHttp
-        ? fetch
-        : userRuntime && userRuntime.kind === 'api_key' && !devMode
-          ? this.s.env.safeFetch
-          : (this.s.env.modelFetch ?? fetch);
       const userModelName = userRuntime ? (userRuntime.model || 'deepseek-flash') : '';
       const candidates: Backend[] = userRuntime
         ? [{
@@ -391,29 +478,90 @@ export class ModelRouter {
             thinking: /reasoner|v4-pro/i.test(userModelName) ? 'omit' : 'disabled',
           }]
         : this.backends();
-      const sticky = userRuntime ? null : this.s.get('model_sticky', scope)?.backend;
-      const ordered = [...candidates].sort((a, b) => Number(b.id === sticky) - Number(a.id === sticky));
-      if (!userRuntime && !sticky && ordered.length) {
+      const roundRobin = !userRuntime && this.routingMode() === 'round_robin';
+      const sticky = roundRobin ? this.s.get('model_sticky', scope)?.backend : null;
+      const ordered = sticky
+        ? [...candidates].sort((a, b) => Number(b.id === sticky) - Number(a.id === sticky))
+        : [...candidates];
+      if (roundRobin && !sticky && ordered.length) {
         const n = this.cursor++ % ordered.length;
         ordered.push(...ordered.splice(0, n));
       }
+      const epoch = this.healthEpoch;
+      const MAX_BACKENDS_PER_CALL = 4;
+      const MAX_ATTEMPTS_PER_CALL = 8;
+      const callDeadline = Date.now() + Math.max(5000, requestMs);
       const errors: Array<{backend: string; error: string}> = [];
-      let lastError = 'NO_BACKEND_AVAILABLE';
+      let lastError = '当前没有可用的模型后端，请稍后再试';
       const nowMs = Date.now();
-      let toTry = userRuntime ? ordered : ordered.filter(b => (this.s.get('model_health', b.id)?.retry_at ?? 0) <= nowMs);
-      if (!toTry.length && ordered.length) {
-        const soonest = [...ordered].sort(
-          (a, b) => (this.s.get('model_health', a.id)?.retry_at ?? 0) - (this.s.get('model_health', b.id)?.retry_at ?? 0)
-        )[0];
-        toTry = [soonest];
+      let toTry = userRuntime
+        ? ordered
+        : ordered.filter(b => {
+            const h = this.s.get('model_health', b.id);
+            const fails = h?.failures ?? 0;
+            if (fails <= 0) return true; // CLOSED
+            if ((h?.retry_at ?? 0) > nowMs) return false; // OPEN (cooling down)
+            return !this.probing.has(b.id); // HALF_OPEN: allow single-flight probe only
+          });
+      if (!userRuntime && !toTry.length && ordered.length) {
+        const anyProbing = ordered.some(b => this.probing.has(b.id));
+        const soonestRetry = Math.min(
+          ...ordered.map(b => this.s.get('model_health', b.id)?.retry_at ?? 0)
+        );
+        const waitSec = Math.max(1, Math.ceil(Math.max(0, soonestRetry - nowMs) / 1000));
+        problem(
+          anyProbing
+            ? '模型服务正在探测恢复中，请稍候几秒再试'
+            : `所有模型后端正在熔断冷却中（约 ${waitSec} 秒后自动探测恢复），请稍后再试`,
+          503,
+          'MODELS_UNAVAILABLE'
+        );
       }
+      toTry = toTry.slice(0, MAX_BACKENDS_PER_CALL);
 
       for (const backend of toTry) {
         if (signal?.aborted) throw Error('CANCELLED');
+        const remMs = callDeadline - Date.now();
+        if (remMs <= 0 || meter.request_attempts >= MAX_ATTEMPTS_PER_CALL) break;
+        const prevHealth = !userRuntime ? this.s.get('model_health', backend.id) : null;
+        const isUnhealthy = !userRuntime && (prevHealth?.failures ?? 0) > 0;
+        if (isUnhealthy && ((prevHealth?.retry_at ?? 0) > Date.now() || this.probing.has(backend.id))) continue;
+        const isHalfOpen = isUnhealthy;
+        const base = userRuntime
+          ? this.normalizeBase(userFixedBase, true)
+          : this.normalizeBase(this.backendBase(backend), false);
+        const key = userRuntime ? userRuntime.token : this.backendKey(backend);
+        if (!base || !key) {
+          lastError = '模型后端缺少接口地址或密钥配置';
+          errors.push({backend: backend.id, error: lastError});
+          continue;
+        }
+        const isHttp = base.startsWith('http://');
+        if (isHttp && !devMode) {
+          if (userRuntime) problem('生产环境模型接口必须使用 HTTPS', 400);
+          lastError = '生产环境模型接口必须使用 HTTPS';
+          errors.push({backend: backend.id, error: lastError});
+          continue;
+        }
+        const doFetch = isHttp
+          ? fetch
+          : userRuntime && userRuntime.kind === 'api_key' && !devMode
+            ? this.s.env.safeFetch
+            : (this.s.env.modelFetch ?? fetch);
+        let probeToken: symbol | null = null;
+        if (isHalfOpen) {
+          probeToken = Symbol(backend.id);
+          this.probing.set(backend.id, probeToken);
+        }
         const control = new AbortController();
+        let timedOut = false;
         const abort = () => control.abort();
+        const onTimeout = () => {
+          timedOut = true;
+          control.abort();
+        };
         signal?.addEventListener('abort', abort, {once: true});
-        const timer = setTimeout(abort, requestMs);
+        let timer = setTimeout(onTimeout, Math.min(requestMs, remMs));
         try {
           const context = Math.min(AGENT_LIMITS.context_tokens, backend.context_tokens);
           const output = Math.min(
@@ -434,6 +582,9 @@ export class ModelRouter {
             };
             let res!: Response;
             for (let attempt = 0; attempt < 2; attempt++) {
+              if (meter.request_attempts >= MAX_ATTEMPTS_PER_CALL) {
+                throw Object.assign(Error('MODEL_ATTEMPT_BUDGET_EXCEEDED'), {code: 'ATTEMPT_BUDGET'});
+              }
               try {
                 meter.request_attempts++;
                 const authHdr: Record<string, string> = userRuntime?.kind === 'dsh_token'
@@ -490,6 +641,11 @@ export class ModelRouter {
           try {
             if (ct.includes('text/event-stream')) {
               clearTimeout(timer);
+              const streamMaxMs = Math.min(
+                AGENT_LIMITS.wall_ms,
+                Math.max(requestMs, Math.min(requestMs * 2, 180000))
+              );
+              timer = setTimeout(onTimeout, streamMaxMs);
               data = await consumeSSE(response, Math.min(AGENT_LIMITS.idle_ms, requestMs), control.signal, onDelta);
             } else {
               data = await readJSON(response, 4 * 1024 * 1024);
@@ -523,7 +679,7 @@ export class ModelRouter {
             throw Error('MODEL_INCOMPLETE_' + finishReason);
           }
 
-          if (!userRuntime) {
+          if (!userRuntime && this.healthEpoch === epoch) {
             this.s.put('model_health', {id: backend.id, failures: 0, retry_at: 0});
             this.s.put('model_sticky', {id: scope, backend: backend.id});
           }
@@ -542,23 +698,29 @@ export class ModelRouter {
           };
         } catch (e: any) {
           if (signal?.aborted) throw Error('CANCELLED');
-          if (e?.nonBackend) throw e;
-          lastError = friendlyModelError(e, base, !!userRuntime);
+          const errObj = timedOut ? Object.assign(Error('MODEL_STREAM_TIMEOUT'), {code: 'ETIMEDOUT'}) : e;
+          if (errObj?.nonBackend) throw errObj;
+          lastError = friendlyModelError(errObj, base, !!userRuntime);
           errors.push({backend: backend.id, error: lastError});
-          if (userRuntime && /MODEL_HTTP_401|MODEL_HTTP_403/.test(String(e?.message ?? ''))) {
+          if (userRuntime && /MODEL_HTTP_401|MODEL_HTTP_403/.test(String(errObj?.message ?? ''))) {
             problem(lastError, 401, 'AI_CRED_REVOKED');
           }
-          if (!userRuntime) {
+          if (!userRuntime && this.healthEpoch === epoch) {
             const failures = (this.s.get('model_health', backend.id)?.failures ?? 0) + 1;
             const capMs = candidates.length <= 1 ? 15000 : 300000;
+            const isConfigAuthErr = /MODEL_HTTP_(401|403|404)/.test(String(errObj?.message ?? ''));
+            const backoffMs = isConfigAuthErr ? capMs : Math.min(capMs, 1000 * 2 ** Math.min(failures, 9));
             this.s.put('model_health', {
               id: backend.id,
               failures,
-              retry_at: Date.now() + Math.min(capMs, 1000 * 2 ** Math.min(failures, 6)),
+              retry_at: Date.now() + backoffMs,
               last_error: lastError,
             });
           }
         } finally {
+          if (probeToken && this.probing.get(backend.id) === probeToken) {
+            this.probing.delete(backend.id);
+          }
           clearTimeout(timer);
           signal?.removeEventListener('abort', abort);
         }
