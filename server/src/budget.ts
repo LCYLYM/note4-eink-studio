@@ -1,6 +1,6 @@
 import {initializeMeter} from './storage-meter';
 import {problem} from './accounts';
-export const LIMITS={accounts:100,works_per_user:20,services_per_user:10,devices_per_user:5,storage_bytes_per_user:20*1024*1024,storage_bytes_platform:512*1024*1024,monthly_credits:1000,ai_concurrent_per_user:1,ai_concurrent_platform:1,ai_max_tokens:2097152,ai_wall_ms:300000,request_per_minute:120,request_platform_per_minute:2000,build_cost:1,service_run_cost:1,model_tokens_per_credit:1000} as const;
+export const LIMITS={accounts:2000,works_per_user:20,services_per_user:10,devices_per_user:5,storage_bytes_per_user:20*1024*1024,storage_bytes_platform:2048*1024*1024,monthly_credits:1000,ai_concurrent_per_user:1,ai_concurrent_platform:1,ai_max_tokens:2097152,ai_wall_ms:300000,request_per_minute:120,request_platform_per_minute:2000,build_cost:1,service_run_cost:1,model_tokens_per_credit:1000} as const;
 type Store={get:(type:string,id:string)=>any;put:(type:string,value:any,key?:string)=>any;all:(type:string)=>any[];ctx:any};
 export class Budget{
  constructor(private s:Store){}
