@@ -53,6 +53,18 @@ export function voiceCredHeaders() {
   };
 }
 
+async function serverNowSec() {
+  try {
+    const r = await fetch('/', {method: 'HEAD', cache: 'no-store'});
+    const d = r.headers.get('date');
+    if (d) {
+      const ms = new Date(d).getTime();
+      if (Number.isFinite(ms) && ms > 0) return Math.floor(ms / 1000);
+    }
+  } catch {}
+  return Math.floor(Date.now() / 1000);
+}
+
 export async function syncVoiceCredOverUsb(usb) {
   const c = readLocalVoiceCred();
   if (!c || !usb?.port) return false;
@@ -62,7 +74,7 @@ export async function syncVoiceCredOverUsb(usb) {
     token: c.token,
     base_url: c.base_url || 'https://api.deepseek.com',
     model: c.model || 'deepseek-flash',
-    rev: c.rev || Math.floor(Date.now() / 1000),
+    rev: Math.max(Number(c.rev) || 0, await serverNowSec()),
   }, 'set_ai_cred');
   return true;
 }
@@ -104,7 +116,7 @@ export async function verifyLocalVoiceCred({api, usb, onRevoked, tell, minAgeMs 
       const fresh = await api('/ai-cred/status?refresh=1');
       if (fresh?.revoked) {
         clearLocalVoiceCred();
-        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
         await onRevoked?.();
         tell?.('检测到 DeepSeek 账号已在官网退出或失效，已自动清除本地登录态，请重新登录');
         return {valid: false, revoked: true, cred: null};
@@ -117,7 +129,7 @@ export async function verifyLocalVoiceCred({api, usb, onRevoked, tell, minAgeMs 
     } catch (err) {
       if (err?.status === 401 || err?.code === 'AI_CRED_REVOKED') {
         clearLocalVoiceCred();
-        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
         await onRevoked?.();
         tell?.('检测到 DeepSeek 账号已在官网退出或失效，已自动清除本地登录态，请重新登录');
         return {valid: false, revoked: true, cred: null};
@@ -143,7 +155,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
         : await api('/ai-cred/status?refresh=1').catch(err => (err?.status === 401 || err?.code === 'AI_CRED_REVOKED' ? {revoked: true} : null));
       if (fresh?.revoked) {
         clearLocalVoiceCred();
-        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+        if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
         local = null;
         revokedNotice = true;
         await onUpdated?.();
@@ -164,7 +176,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
           });
           if (mRevoked) {
             clearLocalVoiceCred();
-            if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+            if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
             local = null;
             revokedNotice = true;
             await onUpdated?.();
@@ -401,7 +413,10 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   document.getElementById('vcModelSelect')?.addEventListener('change', async e => {
     const chosen = e.currentTarget.value || 'deepseek-flash';
     if (!local) return;
-    local = saveLocalVoiceCred({...local, model: chosen, rev: Math.floor(Date.now() / 1000)});
+    const rev = Math.max(Number(local.rev) || 0, await serverNowSec());
+    const current = readLocalVoiceCred();
+    if (!current || current.token !== local.token) return; // logged out or re-keyed while the clock fetch was in flight
+    local = saveLocalVoiceCred({...local, model: chosen, rev});
     if (usb?.port) await syncVoiceCredOverUsb(usb).catch(() => {});
     await onUpdated?.();
     tell(`已切换个人模型为 ${chosen}`);
@@ -410,7 +425,7 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   document.getElementById('vcUnbind')?.addEventListener('click', async () => {
     await api('/ai-cred/logout', 'POST', {}).catch(() => {});
     clearLocalVoiceCred();
-    if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+    if (usb?.port) await usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
     await finish('已吊销并清除本浏览器与设备上的个人语音凭证');
   });
 
@@ -634,7 +649,7 @@ export async function runSimulatorVoiceTurn({utterance, vm, work, api, paint, te
     const isRevoked = err?.status === 401 || err?.code === 'AI_CRED_REVOKED' || /AI_CRED_REVOKED|官网退出|失效/.test(String(err?.message || ''));
     if (isRevoked) {
       clearLocalVoiceCred();
-      if (usb?.port) usb.command({op: 'set_ai_cred', clear: true, rev: Math.floor(Date.now() / 1000)}, 'set_ai_cred').catch(() => {});
+      if (usb?.port) usb.command({op: 'set_ai_cred', clear: true, rev: await serverNowSec()}, 'set_ai_cred').catch(() => {});
       onRevoked?.();
       vm.agentEmit('error', '请重登');
       if (vm.dirty()) paint();

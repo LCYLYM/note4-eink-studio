@@ -179,9 +179,11 @@ export function readCallerBrowserCred(r: Request, allowLocalHttp = false) {
 
 export function pendingDeviceAiCredRev(deviceId: string, deviceOwner?: string, credClearRev = 0): number {
   sweepEphemeral();
-  if (!deviceOwner) return credClearRev > 0 ? credClearRev : 0;
+  const clear = credClearRev > 0 ? credClearRev : 0;
+  if (!deviceOwner) return clear;
   const drop = ramDeviceDrops.get(deviceId);
-  return drop && drop.owner === deviceOwner ? drop.rev : 0;
+  const dropRev = drop && drop.owner === deviceOwner ? drop.rev : 0;
+  return Math.max(clear, dropRev);
 }
 
 /** One-time volatile RAM delivery bound strictly to (deviceId, deviceOwner); immediately wiped on read! */
@@ -194,7 +196,10 @@ export async function getDeviceAiCredPayload(_platform: any, deviceOwner?: strin
     return {rev: credClearRev > 0 ? credClearRev : 0, cleared: true};
   }
   const drop = ramDeviceDrops.get(deviceId);
-  if (!drop || drop.owner !== deviceOwner) return {rev: 0, cleared: true};
+  if (!drop || drop.owner !== deviceOwner) {
+    // No newer credential queued: keep retrying the unbind wipe (firmware skips idempotently once rev matches).
+    return {rev: credClearRev > 0 ? credClearRev : 0, cleared: true};
+  }
   ramDeviceDrops.delete(deviceId); // Self-destruct immediately on single device read!
   return drop.payload;
 }
@@ -450,19 +455,21 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
         });
       } catch {}
     }
-    const rev = Math.floor(Date.now() / 1000);
+    const baseRev = Math.floor(Date.now() / 1000);
     for (const d of platform.owned('device', uid)) {
+      const rev = Math.max(baseRev, (Number(d.cred_clear_rev) || 0) + 1);
       ramDeviceDrops.set(d.id, {owner: uid, rev, payload: {rev, cleared: true}, expiresAt: Date.now() + 3600000});
     }
-    return Response.json({ok: true, configured: false, rev}, {headers: {'Cache-Control': 'no-store'}});
+    return Response.json({ok: true, configured: false, rev: baseRev}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/sync-devices' && method === 'POST') {
     const caller = readCallerBrowserCred(r, devLocal);
     if (!caller) throw Object.assign(Error('请先在当前浏览器登录 DeepSeek 账号或填写 API Key'), {status: 400});
-    const rev = Math.floor(Date.now() / 1000);
+    const baseRev = Math.floor(Date.now() / 1000);
     const ownedDevs = platform.owned('device', uid);
     for (const d of ownedDevs) {
+      const rev = Math.max(baseRev, (Number(d.cred_clear_rev) || 0) + 1);
       ramDeviceDrops.set(d.id, {
         owner: uid,
         rev,
@@ -470,7 +477,7 @@ export async function handleAiCredRoute(platform: any, r: Request, uid: string):
         expiresAt: Date.now() + 3600000,
       });
     }
-    return Response.json({ok: true, rev, devices: ownedDevs.length, ttl_seconds: 3600}, {headers: {'Cache-Control': 'no-store'}});
+    return Response.json({ok: true, rev: baseRev, devices: ownedDevs.length, ttl_seconds: 3600}, {headers: {'Cache-Control': 'no-store'}});
   }
 
   if (sub === '/sim-step' && method === 'POST') {
