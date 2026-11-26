@@ -1168,15 +1168,18 @@ const char* voice_phase_name() {
 }
 
 void voice_sync_cred_if_needed(int64_t server_rev) {
-    if (server_rev <= voice_cred_rev()) return; // monotonic revs: never act on stale/duplicate instructions (a lower rev must not downgrade-wipe a newer credential)
+    if (server_rev <= 0 || server_rev == voice_cred_rev()) return;
     std::string out;
     if (device_http("/api/device/ai-cred", "", out) != 200) return;
     cJSON* j = cJSON_Parse(out.c_str());
     if (!j) return;
     int64_t rev = cJSON_IsNumber(cJSON_GetObjectItem(j, "rev")) ? int64_t(cJSON_GetObjectItem(j, "rev")->valuedouble) : server_rev;
     if (cJSON_IsTrue(cJSON_GetObjectItem(j, "cleared"))) {
-        voice_clear_cred(rev);
-        printf("NOTE4 VOICE {\"cred_synced\":\"cleared\",\"rev\":%lld}\n", (long long)rev);
+        // Wipes are forward-only: a stale clear rev must never erase a newer credential installed via USB or a fresher push.
+        if (rev > voice_cred_rev()) {
+            voice_clear_cred(rev);
+            printf("NOTE4 VOICE {\"cred_synced\":\"cleared\",\"rev\":%lld}\n", (long long)rev);
+        }
     } else {
         auto s = [&](const char* k) { auto* v = cJSON_GetObjectItem(j, k); return cJSON_IsString(v) ? v->valuestring : ""; };
         if (voice_set_cred(s("kind"), s("token"), s("base_url"), s("model"), rev)) {
