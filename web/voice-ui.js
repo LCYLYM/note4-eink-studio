@@ -413,7 +413,10 @@ export async function openVoiceCredDialog({api, dialog, tell, usb, onUpdated}) {
   document.getElementById('vcModelSelect')?.addEventListener('change', async e => {
     const chosen = e.currentTarget.value || 'deepseek-flash';
     if (!local) return;
-    local = saveLocalVoiceCred({...local, model: chosen, rev: Math.max(Number(local.rev) || 0, await serverNowSec())});
+    const rev = Math.max(Number(local.rev) || 0, await serverNowSec());
+    const current = readLocalVoiceCred();
+    if (!current || current.token !== local.token) return; // logged out or re-keyed while the clock fetch was in flight
+    local = saveLocalVoiceCred({...local, model: chosen, rev});
     if (usb?.port) await syncVoiceCredOverUsb(usb).catch(() => {});
     await onUpdated?.();
     tell(`已切换个人模型为 ${chosen}`);
