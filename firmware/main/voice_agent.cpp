@@ -1181,9 +1181,12 @@ void voice_sync_cred_if_needed(int64_t server_rev) {
             printf("NOTE4 VOICE {\"cred_synced\":\"cleared\",\"rev\":%lld}\n", (long long)rev);
         }
     } else {
-        auto s = [&](const char* k) { auto* v = cJSON_GetObjectItem(j, k); return cJSON_IsString(v) ? v->valuestring : ""; };
-        if (voice_set_cred(s("kind"), s("token"), s("base_url"), s("model"), rev)) {
-            printf("NOTE4 VOICE {\"cred_synced\":\"%s\",\"rev\":%lld}\n", s("kind"), (long long)rev);
+        // All revs are server-clock now: a push only applies forward, so a stale queued drop can never resurrect a revoked key.
+        if (rev > voice_cred_rev()) {
+            auto s = [&](const char* k) { auto* v = cJSON_GetObjectItem(j, k); return cJSON_IsString(v) ? v->valuestring : ""; };
+            if (voice_set_cred(s("kind"), s("token"), s("base_url"), s("model"), rev)) {
+                printf("NOTE4 VOICE {\"cred_synced\":\"%s\",\"rev\":%lld}\n", s("kind"), (long long)rev);
+            }
         }
     }
     cJSON_Delete(j);
